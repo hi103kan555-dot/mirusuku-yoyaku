@@ -188,6 +188,22 @@
   .res-item button{ background:none; border:none; color:var(--brown-soft); font-size:14px; cursor:pointer; }
   .res-item button:hover{ color:#B24C33; }
   .res-add{ display:flex; gap:8px; }
+
+  /* モバイルファースト: 基本は小画面向けの余白・文字サイズに絞り、広い画面では余裕を持たせる */
+  .hero{ flex-wrap:wrap; }
+  .hero-actions{ width:100%; }
+  .icon-round-btn{ flex:1; }
+  h1{ font-size:20px; }
+  .card{ padding:14px; border-radius:18px; }
+  .modal{ padding:18px; }
+
+  @media (min-width:520px){
+    .hero-actions{ width:auto; }
+    .icon-round-btn{ flex:none; }
+    h1{ font-size:24px; }
+    .card{ padding:18px; border-radius:22px; }
+    .modal{ padding:24px; }
+  }
 </style>
 </head>
 <body>
@@ -301,7 +317,9 @@
           <button id="next-month">次の月 →</button>
         </div>
       </div>
-      <div id="month-grid" class="month-grid"></div>
+      <div style="overflow-x:auto;">
+        <div id="month-grid" class="month-grid"></div>
+      </div>
     </div>
   </div>
 
@@ -1035,10 +1053,12 @@ function openResourceAvailability(resourceId, displayName){
       <button class="btn btn-ghost" type="button" id="avail-check-all" style="flex:none; padding:6px 14px; font-size:12.5px;">全て選択</button>
       <button class="btn btn-ghost" type="button" id="avail-uncheck-all" style="flex:none; padding:6px 14px; font-size:12.5px;">全て解除</button>
     </div>
-    <table class="avail-table">
-      <thead><tr><th></th>${WEEKDAYS.map(wd => `<th class="col-toggle" data-wd="${wd}" style="cursor:pointer; text-decoration:underline;">${WEEKDAY_LABEL[wd]}</th>`).join('')}</tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <div style="overflow-x:auto;">
+      <table class="avail-table">
+        <thead><tr><th></th>${WEEKDAYS.map(wd => `<th class="col-toggle" data-wd="${wd}" style="cursor:pointer; text-decoration:underline;">${WEEKDAY_LABEL[wd]}</th>`).join('')}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
     <label>NG日を追加(その日は終日対応不可になります)</label>
     <div class="res-add" style="margin-bottom:10px;">
       <input type="date" id="ng-date-input">
