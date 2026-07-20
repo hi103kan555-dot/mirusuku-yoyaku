@@ -55,14 +55,13 @@
   .profile-bar b{ color:var(--brown); }
   .profile-bar a{ color:#FF9F1C; font-weight:700; cursor:pointer; text-decoration:none; }
 
-  .tabs{ display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; margin-bottom:14px; -webkit-overflow-scrolling:touch; }
+  .tabs{ display:flex; gap:8px; overflow-x:auto; padding:6px 2px 8px; margin-bottom:14px; -webkit-overflow-scrolling:touch; }
   .tab-btn{
     flex-shrink:0; font-family:inherit; font-size:13.5px; font-weight:700; padding:10px 16px;
     border-radius:999px; border:2px solid var(--line); background:#fff; color:var(--brown-soft);
     cursor:pointer; white-space:nowrap; transition:transform 0.1s ease;
   }
-  .tab-btn:hover{ transform:translateY(-1px); }
-  .tab-btn.active{ border-color:transparent; }
+  .tab-btn.active{ border-color:var(--brown); box-shadow:0 0 0 1px var(--brown); }
 
   .toolbar-row{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; flex-wrap:wrap; gap:8px; }
   .week-nav{ display:flex; align-items:center; gap:8px; }
@@ -188,6 +187,38 @@
   .res-item button{ background:none; border:none; color:var(--brown-soft); font-size:14px; cursor:pointer; }
   .res-item button:hover{ color:#B24C33; }
   .res-add{ display:flex; gap:8px; }
+
+  /* もっとポップでかわいく: バウンス感・虹色アクセント・丸いスウォッチ */
+  .card{ position:relative; overflow:hidden; }
+  .card::before{
+    content:''; position:absolute; top:0; left:0; right:0; height:6px;
+    background:linear-gradient(90deg,#FFD93D,#FF8FB1,#B9A3FF,#8FD19E,#FF9F1C);
+  }
+  .logo-badge .dot1{ animation:pop-pulse 1.8s ease-in-out infinite; }
+  @keyframes pop-pulse{ 0%,100%{ transform:scale(1); } 50%{ transform:scale(1.25); } }
+
+  .btn, .tab-btn, .mini-btn, .icon-round-btn, .cell, .month-event{
+    transition:transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .btn:hover, .mini-btn:hover, .icon-round-btn:hover{ transform:translateY(-2px) scale(1.03); }
+  .btn:active, .mini-btn:active, .icon-round-btn:active{ transform:translateY(0) scale(0.96); }
+  .tab-btn:hover{ transform:scale(1.04); }
+  .tab-btn:active{ transform:scale(0.96); }
+  .cell:hover{ transform:scale(1.05); }
+
+  .btn-primary{ background:linear-gradient(135deg,#FFB347,#FF8FB1); }
+  .btn-primary:hover{ background:linear-gradient(135deg,#FFA82E,#FF7CA6); }
+  .btn-confirm{ background:linear-gradient(135deg,#8FD19E,#7FE8C4); }
+  .mini-btn.confirm{ background:linear-gradient(135deg,#8FD19E,#7FE8C4); }
+
+  .swatch{ border-radius:50% !important; }
+  .ins-dot{ box-shadow:0 0 0 2px #fff, 0 0 0 3px var(--line); }
+  .badge{ box-shadow:0 2px 0 rgba(107,66,38,0.1); }
+  .status-pill{ box-shadow:0 2px 0 rgba(107,66,38,0.1); }
+
+  h1{ letter-spacing:0.02em; }
+  .cell.confirmed, .cell.pending, .cell.candidate{ border-radius:14px; }
+  .month-cell{ border-radius:14px; }
 
   /* モバイルファースト: 基本は小画面向けの余白・文字サイズに絞り、広い画面では余裕を持たせる */
   .hero{ flex-wrap:wrap; }
