@@ -441,6 +441,38 @@ function formspreeUrl(value){
   return `https://formspree.io/f/${v}`;
 }
 
+// Googleスプレッドシート連携（Apps Script Web API）
+const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbwxPkMJj5ous5j3p1HdNV6X8QJOSAMma8uth7ZNLg0TWKjIP06D77FcXj_ZJBYAyej53Q/exec';
+
+async function sendReservationToSheet(req){
+  const candidates = Array.isArray(req.candidates) ? req.candidates : [];
+  const toIso = (candidate) => candidate
+    ? `${candidate.date}T${String(candidate.hour).padStart(2, '0')}:00:00+09:00`
+    : '';
+  const ins = instructorOf(req.instructorId);
+
+  const payload = {
+    reservationId: req.id,
+    name: req.name || '',
+    email: req.email || '',
+    lineName: '',
+    firstChoice: toIso(candidates[0]),
+    secondChoice: toIso(candidates[1]),
+    thirdChoice: toIso(candidates[2]),
+    staff: ins ? ins.name : '',
+    status: '申請中',
+    memo: `${req.course || ''}${req.memo ? '｜' + req.memo : ''}`
+  };
+
+  // text/plain と no-cors を使い、GitHub PagesからApps Scriptへ送信
+  await fetch(SHEET_API_URL, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(payload)
+  });
+}
+
 async function loadRequests(){
   try{
     const result = await window.storage.get(STORAGE_KEY, true);
@@ -954,6 +986,13 @@ function openCandidateApplyModal(){
     };
     requests.push(newReq);
     await saveRequests();
+    try{
+      await sendReservationToSheet(newReq);
+      setStatus('予約申請を受け付け、管理表にも登録しました。');
+    }catch(e){
+      console.error('スプレッドシート連携エラー:', e);
+      setStatus('予約は保存しましたが、管理表への送信に失敗しました。');
+    }
     selectedCandidates = [];
     closeModal();
     renderAll();
