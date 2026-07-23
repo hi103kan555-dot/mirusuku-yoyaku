@@ -297,13 +297,7 @@
         <table class="schedule" id="schedule"></table>
       </div>
 
-      <div class="legend">
-        <span><span class="swatch open"></span>未予約</span>
-        <span><span class="swatch candidate"></span>選択中の候補</span>
-        <span><span class="swatch pending"></span>申請中</span>
-        <span><span class="swatch confirmed"></span>確定</span>
-        <span><span class="swatch off"></span>対応時間外</span>
-      </div>
+      <div class="legend" id="legend"></div>
 
       <div class="candidate-bar" id="candidate-bar">
         <span id="candidate-count-label">候補: 0/3</span>
@@ -439,38 +433,6 @@ function formspreeUrl(value){
   if(!v) return '';
   if(v.startsWith('http')) return v;
   return `https://formspree.io/f/${v}`;
-}
-
-// Googleスプレッドシート連携（Apps Script Web API）
-const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbwxPkMJj5ous5j3p1HdNV6X8QJOSAMma8uth7ZNLg0TWKjIP06D77FcXj_ZJBYAyej53Q/exec';
-
-async function sendReservationToSheet(req){
-  const candidates = Array.isArray(req.candidates) ? req.candidates : [];
-  const toIso = (candidate) => candidate
-    ? `${candidate.date}T${String(candidate.hour).padStart(2, '0')}:00:00+09:00`
-    : '';
-  const ins = instructorOf(req.instructorId);
-
-  const payload = {
-    reservationId: req.id,
-    name: req.name || '',
-    email: req.email || '',
-    lineName: '',
-    firstChoice: toIso(candidates[0]),
-    secondChoice: toIso(candidates[1]),
-    thirdChoice: toIso(candidates[2]),
-    staff: ins ? ins.name : '',
-    status: '申請中',
-    memo: `${req.course || ''}${req.memo ? '｜' + req.memo : ''}`
-  };
-
-  // text/plain と no-cors を使い、GitHub PagesからApps Scriptへ送信
-  await fetch(SHEET_API_URL, {
-    method: 'POST',
-    mode: 'no-cors',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(payload)
-  });
 }
 
 async function loadRequests(){
@@ -692,10 +654,11 @@ function computeCapacity(instructorId, dateObj, hour){
   const wd = isoWeekday(dateObj);
   const dstr = dateKey(dateObj);
   if(instructorId === 'unei'){
-    return UNEI_STAFF.filter(s => {
+    const anyStaffAvailable = UNEI_STAFF.some(s => {
       const rid = 'unei_' + s.id;
       return isAvailableResource(rid, wd, hour) && !isNgDateResource(rid, dstr);
-    }).length;
+    });
+    return anyStaffAvailable ? 1 : 0;
   }
   return (isAvailableResource(instructorId, wd, hour) && !isNgDateResource(instructorId, dstr)) ? 1 : 0;
 }
@@ -729,9 +692,30 @@ function renderWeekLabel(dates){
   weekLabelEl.textContent = `${fmt(first)} 〜 ${fmt(last)}`;
 }
 
+function renderLegend(){
+  const isUneiViewer = studentProfile && studentProfile.role === 'unei';
+  const legendEl = document.getElementById('legend');
+  if(isUneiViewer){
+    legendEl.innerHTML = `
+      <span><span class="swatch open"></span>未予約</span>
+      <span><span class="swatch candidate"></span>選択中の候補</span>
+      <span><span class="swatch pending"></span>申請中</span>
+      <span><span class="swatch confirmed"></span>確定</span>
+      <span><span class="swatch off"></span>対応時間外</span>
+    `;
+  }else{
+    legendEl.innerHTML = `
+      <span><span class="swatch open"></span>◎ 予約できます</span>
+      <span><span class="swatch candidate"></span>選択中の候補</span>
+      <span><span class="swatch off"></span>× 予約できません</span>
+    `;
+  }
+}
+
 function renderSchedule(){
   const dates = getWeekDates(weekOffset);
   renderWeekLabel(dates);
+  renderLegend();
   const today = new Date();
 
   let html = '<thead><tr><th class="hour-label"></th>';
@@ -753,20 +737,28 @@ function renderSchedule(){
       let cls = 'cell';
       let label = '空き';
       let clickable = true;
+      const isUneiViewer = studentProfile && studentProfile.role === 'unei';
 
       if(capacity === 0){
-        cls += ' off'; label = '−'; clickable = false;
+        cls += ' off';
+        label = isUneiViewer ? '−' : '×';
+        clickable = false;
       }else if(remaining <= 0){
         const allConfirmed = cellReqs.length > 0 && cellReqs.every(r => r.status === 'confirmed');
-        cls += allConfirmed ? ' confirmed' : ' pending';
-        label = capacity > 1 ? (allConfirmed ? '確定(満)' : '調整中(満)') : (allConfirmed ? '確定' : '申請中');
+        if(isUneiViewer){
+          cls += allConfirmed ? ' confirmed' : ' pending';
+          label = allConfirmed ? '確定' : '申請中';
+        }else{
+          cls += ' off';
+          label = '×';
+        }
         clickable = false;
       }else if(isSelected){
         cls += ' candidate';
         const idx = selectedCandidates.findIndex(c => c.date === dstr && c.hour === hour);
         label = `候補${idx+1}`;
       }else{
-        label = capacity > 1 && remaining < capacity ? `空き(残${remaining})` : '空き';
+        label = isUneiViewer ? '空き' : '◎';
       }
 
       html += `<td class="${cls}" ${clickable || isSelected ? `data-date="${dstr}" data-hour="${hour}"` : ''} data-clickable="${clickable}">${label}</td>`;
@@ -986,13 +978,6 @@ function openCandidateApplyModal(){
     };
     requests.push(newReq);
     await saveRequests();
-    try{
-      await sendReservationToSheet(newReq);
-      setStatus('予約申請を受け付け、管理表にも登録しました。');
-    }catch(e){
-      console.error('スプレッドシート連携エラー:', e);
-      setStatus('予約は保存しましたが、管理表への送信に失敗しました。');
-    }
     selectedCandidates = [];
     closeModal();
     renderAll();
