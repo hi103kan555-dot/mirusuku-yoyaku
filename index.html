@@ -280,6 +280,19 @@
         <span><b id="profile-name"></b> さん(<span id="profile-email"></span>) としてログイン中</span>
         <a id="profile-edit">プロフィールを変更</a>
       </div>
+    </div>
+
+    <div class="card" id="mode-select-card" style="display:none;">
+      <h2>何を予約しますか?</h2>
+      <div style="display:flex; gap:12px; flex-wrap:wrap;">
+        <button class="btn btn-primary" id="mode-lesson" style="min-width:150px; padding:18px; font-size:15px;">🎨 レッスン予約</button>
+        <button class="btn btn-confirm" id="mode-unei" style="min-width:150px; padding:18px; font-size:15px;">🏢 運営面談を予約</button>
+      </div>
+    </div>
+
+    <div id="schedule-card" style="display:none;">
+    <div class="card">
+      <button class="link-btn" id="back-to-mode" style="display:none; margin-bottom:10px;">← 予約メニューに戻る</button>
       <div class="tabs" id="tabs"></div>
 
       <div class="toolbar-row">
@@ -309,6 +322,7 @@
         <button class="mini-btn cancel" id="candidate-clear">クリア</button>
         <button class="mini-btn confirm" id="candidate-submit">この候補で申請する</button>
       </div>
+    </div>
     </div>
 
     <div class="card">
@@ -380,7 +394,7 @@ const HOURS = BASE_HOURS;
 const WEEKDAYS = [1,2,3,4,5,6,7];
 const WEEKDAY_LABEL = {1:'月',2:'火',3:'水',4:'木',5:'金',6:'土',7:'日'};
 const CANDIDATE_LABEL = ['第一希望','第二希望','第三希望'];
-const COURSES = ['月2回メンター','月4回コア','6ヶ月コース','初回運営ヒアリング','途中運営ヒアリング'];
+const COURSES = ['ライトコース(月2回面談)','レギュラーコース(月4回面談)','ロングコース(半年コース)','初回運営面談','中間運営面談'];
 
 const STORAGE_KEY = 'mirusuku-schedule-v3';
 const AVAILABILITY_KEY = 'mirusuku-availability';
@@ -388,9 +402,10 @@ const NG_DATES_KEY = 'mirusuku-ng-dates';
 const NOTIFY_SETTINGS_KEY = 'mirusuku-notify-settings';
 const GOOGLE_SETTINGS_KEY = 'mirusuku-google-settings';
 const PROFILE_KEY = 'mirusuku-student-profile';
-const OPERATOR_PASSCODE_KEY = 'mirusuku-unei-passcode';
+const OPERATOR_PASSCODE = 'mirusuku';
 
 let activeInstructor = INSTRUCTORS[0].id;
+let bookingMode = null; // 'lesson' | 'unei' | null (生徒が選ぶ予約メニュー)
 let weekOffset = 0;
 let monthOffset = 0;
 let monthInstructorFilter = 'all';
@@ -404,7 +419,6 @@ let studentProfile = null;
 let googleAccessToken = null;
 let tokenClient = null;
 let gateRole = 'student';
-let operatorPasscode = '';
 let selectedCandidates = [];
 let listInstructorFilter = 'all';
 let showLateHoursSchedule = false;
@@ -532,18 +546,6 @@ async function saveProfile(profile){
   studentProfile = profile;
   try{ await window.storage.set(PROFILE_KEY, JSON.stringify(profile), false); }
   catch(e){ setStatus('プロフィールの保存に失敗しました。'); }
-}
-
-async function loadOperatorPasscode(){
-  try{
-    const result = await window.storage.get(OPERATOR_PASSCODE_KEY, true);
-    operatorPasscode = result ? JSON.parse(result.value) : '';
-  }catch(e){ operatorPasscode = ''; }
-}
-async function saveOperatorPasscode(pass){
-  operatorPasscode = pass;
-  try{ await window.storage.set(OPERATOR_PASSCODE_KEY, JSON.stringify(pass), true); }
-  catch(e){ setStatus('パスコードの保存に失敗しました。'); }
 }
 
 async function sendNotification(req, eventType){
@@ -685,11 +687,33 @@ function assignStaffForSlot(dateObj, hour, excludeReqId){
 }
 
 function renderTabs(){
-  tabsEl.innerHTML = INSTRUCTORS.map(ins => {
+  const isUneiViewer = studentProfile && studentProfile.role === 'unei';
+  let list = INSTRUCTORS;
+  if(!isUneiViewer){
+    list = bookingMode === 'unei' ? INSTRUCTORS.filter(i => i.id === 'unei') : INSTRUCTORS.filter(i => i.id !== 'unei');
+  }
+  tabsEl.style.display = (!isUneiViewer && bookingMode === 'unei') ? 'none' : 'flex';
+  tabsEl.innerHTML = list.map(ins => {
     const isActive = ins.id === activeInstructor;
     const style = isActive ? `background:${ins.color}; color:${ins.dark ? 'var(--brown)' : '#fff'};` : '';
     return `<button class="tab-btn${isActive ? ' active' : ''}" style="${style}" data-id="${ins.id}">${escapeHtml(ins.name)}</button>`;
   }).join('');
+}
+
+function selectMode(mode){
+  bookingMode = mode;
+  activeInstructor = mode === 'unei' ? 'unei' : INSTRUCTORS.find(i => i.id !== 'unei').id;
+  selectedCandidates = [];
+  document.getElementById('mode-select-card').style.display = 'none';
+  document.getElementById('schedule-card').style.display = 'block';
+  document.getElementById('back-to-mode').style.display = 'inline-block';
+  renderAll();
+}
+
+function backToModeSelect(){
+  bookingMode = null;
+  document.getElementById('schedule-card').style.display = 'none';
+  document.getElementById('mode-select-card').style.display = 'block';
 }
 
 function renderWeekLabel(dates){
@@ -951,12 +975,23 @@ function courseOptionsHtml(){
 function openCandidateApplyModal(){
   if(selectedCandidates.length === 0) return;
   const ins = instructorOf(activeInstructor);
+  const isLesson = activeInstructor !== 'unei';
   const candidateLines = selectedCandidates.map((c,i) => {
     const d = new Date(c.date + 'T00:00:00');
     return `<div class="info-row"><b>${CANDIDATE_LABEL[i]}:</b> ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${c.hour}:00〜${c.hour+1}:00</div>`;
   }).join('');
+  const teacherCheckHtml = isLesson ? `
+    <div style="background:${ins.color}; color:${ins.dark ? 'var(--brown)' : '#fff'}; border-radius:14px; padding:12px 14px; margin-bottom:12px; font-weight:800; font-size:15px; text-align:center;">
+      予約する講師: ${escapeHtml(ins.name)} 先生
+    </div>
+    <label style="display:flex; align-items:center; gap:8px; font-weight:700; color:var(--brown); margin-bottom:14px;">
+      <input type="checkbox" id="m-teacher-confirm" style="width:auto; margin:0;">
+      この講師(${escapeHtml(ins.name)})で間違いないことを確認しました
+    </label>
+  ` : '';
   modalEl.innerHTML = `
     <h2>${escapeHtml(ins.name)}に申請</h2>
+    ${teacherCheckHtml}
     <div class="sub" style="margin-bottom:12px;">${candidateLines}</div>
     <label>お名前</label>
     <input type="text" id="m-name" value="${escapeHtml(studentProfile ? studentProfile.name : '')}">
@@ -967,10 +1002,17 @@ function openCandidateApplyModal(){
     <label>メモ(任意)</label>
     <textarea id="m-memo" rows="2" placeholder="ご相談内容など"></textarea>
     <div class="modal-actions">
-      <button class="btn btn-primary" id="m-submit">この内容で申請する</button>
+      <button class="btn btn-primary" id="m-submit" ${isLesson ? 'disabled style="opacity:0.5;"' : ''}>この内容で申請する</button>
       <button class="btn btn-ghost" id="m-close">閉じる</button>
     </div>
   `;
+  if(isLesson){
+    const submitBtn = document.getElementById('m-submit');
+    document.getElementById('m-teacher-confirm').addEventListener('change', (e) => {
+      submitBtn.disabled = !e.target.checked;
+      submitBtn.style.opacity = e.target.checked ? '1' : '0.5';
+    });
+  }
   document.getElementById('m-submit').addEventListener('click', async () => {
     const name = document.getElementById('m-name').value.trim();
     const email = document.getElementById('m-email').value.trim();
@@ -1280,6 +1322,18 @@ function showMain(){
   document.getElementById('open-google').style.display = isUnei ? 'inline-flex' : 'none';
   document.getElementById('edit-availability').style.display = isUnei ? 'inline-block' : 'none';
   document.getElementById('month-card').style.display = isUnei ? 'block' : 'none';
+
+  if(isUnei){
+    // 運営はメニュー選択なしで全タブのスケジュールを直接見られるようにする
+    document.getElementById('mode-select-card').style.display = 'none';
+    document.getElementById('schedule-card').style.display = 'block';
+    document.getElementById('back-to-mode').style.display = 'none';
+    activeInstructor = INSTRUCTORS[0].id;
+  }else{
+    document.getElementById('mode-select-card').style.display = 'block';
+    document.getElementById('schedule-card').style.display = 'none';
+    bookingMode = null;
+  }
 }
 
 document.getElementById('role-student').addEventListener('click', () => {
@@ -1296,7 +1350,7 @@ document.getElementById('role-unei').addEventListener('click', () => {
   document.getElementById('gate-passcode-row').style.display = 'flex';
   const helpEl = document.getElementById('gate-passcode-help');
   helpEl.style.display = 'block';
-  helpEl.textContent = operatorPasscode ? '運営パスコードを入力してください。' : 'まだ運営パスコードが設定されていません。ここで入力した内容が新しいパスコードになります。';
+  helpEl.textContent = '運営パスコードを入力してください。';
 });
 
 document.getElementById('gate-submit').addEventListener('click', async () => {
@@ -1306,8 +1360,7 @@ document.getElementById('gate-submit').addEventListener('click', async () => {
   if(gateRole === 'unei'){
     const passcode = document.getElementById('gate-passcode').value;
     if(!passcode){ setStatus('運営パスコードを入力してください。'); return; }
-    if(!operatorPasscode){ await saveOperatorPasscode(passcode); }
-    else if(passcode !== operatorPasscode){ setStatus('運営パスコードが違います。'); return; }
+    if(passcode !== OPERATOR_PASSCODE){ setStatus('運営パスコードが違います。'); return; }
   }
   await saveProfile({ name, email, role: gateRole });
   setStatus('');
@@ -1322,6 +1375,10 @@ document.getElementById('profile-edit').addEventListener('click', () => {
   roleBtn.click();
   showGate();
 });
+
+document.getElementById('mode-lesson').addEventListener('click', () => selectMode('lesson'));
+document.getElementById('mode-unei').addEventListener('click', () => selectMode('unei'));
+document.getElementById('back-to-mode').addEventListener('click', backToModeSelect);
 
 tabsEl.addEventListener('click', (e) => {
   const btn = e.target.closest('.tab-btn');
@@ -1419,7 +1476,7 @@ googleOverlayEl.addEventListener('click', (e) => { if(e.target === googleOverlay
 
 (async function init(){
   setStatus('読み込み中…');
-  await Promise.all([loadProfile(), loadRequests(), loadAvailability(), loadNgDates(), loadNotifySettings(), loadGoogleSettings(), loadOperatorPasscode()]);
+  await Promise.all([loadProfile(), loadRequests(), loadAvailability(), loadNgDates(), loadNotifySettings(), loadGoogleSettings()]);
   setStatus('');
   setupTokenClient();
   if(studentProfile){ showMain(); renderAll(); } else { showGate(); }
