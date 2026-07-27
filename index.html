@@ -74,14 +74,17 @@
   .link-btn{ font-family:inherit; font-size:12.5px; font-weight:700; background:none; border:none; color:#FF9F1C; cursor:pointer; text-decoration:underline; }
 
   .grid-wrap{ overflow-x:auto; border-radius:16px; }
-  table.schedule{ border-collapse:separate; border-spacing:5px; width:100%; min-width:640px; }
+  table.schedule{ border-collapse:separate; border-spacing:5px 3px; width:100%; min-width:640px; }
   .col-head{ font-size:12px; font-weight:700; color:var(--brown-soft); text-align:center; padding:4px 2px; }
   .col-head.today{ color:#FF9F1C; }
-  .hour-label{ font-size:12px; font-weight:700; color:var(--brown-soft); text-align:right; padding-right:8px; white-space:nowrap; width:52px; }
+  .hour-label{ font-size:11.5px; font-weight:700; color:var(--brown-soft); text-align:right; padding-right:8px; white-space:nowrap; width:52px; }
+  .hour-label.on-hour{ color:var(--brown); font-weight:800; }
+  tr.hour-boundary td{ box-shadow:0 -2px 0 rgba(107,66,38,0.12); }
   .cell{
-    height:46px; min-width:78px; border-radius:10px; text-align:center; vertical-align:middle;
-    font-size:11.5px; font-weight:700; cursor:pointer; border:2px dashed var(--line); color:var(--brown-soft);
+    height:34px; min-width:70px; border-radius:9px; text-align:center; vertical-align:middle;
+    font-size:11px; font-weight:700; cursor:pointer; border:2px dashed var(--line); color:var(--brown-soft);
     background:#fffef9; transition:background 0.12s ease;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.2;
   }
   .cell:hover{ background:var(--cream-2); }
   .cell.pending{ border:none; background:var(--pending); color:var(--pending-text); }
@@ -388,8 +391,8 @@ const UNEI_STAFF = [
   { id:'riepyon', name:'りえぴょん' },
   { id:'aroma', name:'アロマ' },
 ];
-const BASE_HOURS = [10,11,12,13,14,15,16,17,18,19,20];
-const LATE_HOURS = [21,22,23,0,1,2,3,4,5,6,7,8,9];
+const BASE_HOURS = buildHourRange(10, 21);
+const LATE_HOURS = buildHourRange(21, 10);
 const HOURS = BASE_HOURS;
 const WEEKDAYS = [1,2,3,4,5,6,7];
 const WEEKDAY_LABEL = {1:'月',2:'火',3:'水',4:'木',5:'金',6:'土',7:'日'};
@@ -447,6 +450,34 @@ function escapeHtml(str){ const d = document.createElement('div'); d.textContent
 function instructorOf(id){ return INSTRUCTORS.find(i => i.id === id); }
 function isoWeekday(d){ const wd = d.getDay(); return wd === 0 ? 7 : wd; }
 function weekdayJp(d){ return ['日','月','火','水','木','金','土'][d.getDay()]; }
+function formatHour(h){ const hh = Math.floor(h); const mm = (Math.round((h % 1) * 60) === 30) ? '30' : '00'; return `${hh}:${mm}`; }
+function hourSortKey(h){ return String(Math.round(h * 60)).padStart(4,'0'); }
+function isoTimeOf(h){
+  const hh = String(Math.floor(h)).padStart(2,'0');
+  const mm = (Math.round((h % 1) * 60) === 30) ? '30' : '00';
+  return `${hh}:${mm}:00`;
+}
+const LESSON_MINUTES = 60;
+function addLessonDuration(dateStr, h){
+  const totalMin = Math.round(h * 60) + LESSON_MINUTES;
+  const dayOverflow = Math.floor(totalMin / 1440);
+  const remMin = ((totalMin % 1440) + 1440) % 1440;
+  const hh = Math.floor(remMin / 60), mm = remMin % 60;
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + dayOverflow);
+  return { date: dateKey(d), time: `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:00` };
+}
+function buildHourRange(start, endExclusive){
+  const arr = [];
+  let h = start;
+  while(true){
+    arr.push(Math.round(h * 2) / 2);
+    h += 0.5;
+    if(h >= 24) h -= 24;
+    if(h === endExclusive) break;
+  }
+  return arr;
+}
 
 function formspreeUrl(value){
   const v = (value || '').trim();
@@ -560,11 +591,11 @@ async function sendNotification(req, eventType){
   if(isApplied){
     dateTimeText = (req.candidates || []).map((c, i) => {
       const d = new Date(c.date + 'T00:00:00');
-      return `${CANDIDATE_LABEL[i] || ''}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${c.hour}:00〜${c.hour+1}:00`;
+      return `${CANDIDATE_LABEL[i] || ''}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(c.hour)}〜${formatHour(c.hour+1)}`;
     }).join(' / ');
   }else{
     const d = new Date(req.date + 'T00:00:00');
-    dateTimeText = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${req.hour}:00〜${req.hour+1}:00`;
+    dateTimeText = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(req.hour)}〜${formatHour(req.hour+1)}`;
   }
   const payload = {
     subject: isApplied ? 'ミルスク 予約の申請を受け付けました' : 'ミルスク 予約が確定しました',
@@ -610,9 +641,9 @@ async function createCalendarEvent(req){
     return;
   }
   const ins = instructorOf(req.instructorId);
-  const pad = n => String(n).padStart(2,'0');
-  const startDateTime = `${req.date}T${pad(req.hour)}:00:00`;
-  const endDateTime = `${req.date}T${pad(req.hour+1)}:00:00`;
+  const startDateTime = `${req.date}T${isoTimeOf(req.hour)}`;
+  const endInfo = addLessonDuration(req.date, req.hour);
+  const endDateTime = `${endInfo.date}T${endInfo.time}`;
   const staffLine = req.assignedStaff ? `\n担当: ${req.assignedStaff}` : '';
   const event = {
     summary: `【${ins ? ins.name : ''}${req.assignedStaff ? '/' + req.assignedStaff : ''}】${req.course || ''} - ${req.name}`,
@@ -650,25 +681,35 @@ function dateKey(d){
 }
 function isSameDate(a,b){ return dateKey(a) === dateKey(b); }
 
+function hoursOverlap(h1, h2){
+  // 開始時刻が30分刻みでも、レッスンは1時間なので重なりで判定する
+  return Math.abs(h1 - h2) < LESSON_MINUTES / 60;
+}
+
 function getCellRequests(instructorId, dateObj, hour){
   const dstr = dateKey(dateObj);
   return requests.filter(r => r.instructorId === instructorId && (
-    (r.status === 'confirmed' && r.date === dstr && r.hour === hour) ||
-    (r.status === 'pending' && r.candidates && r.candidates.some(c => c.date === dstr && c.hour === hour))
+    (r.status === 'confirmed' && r.date === dstr && hoursOverlap(r.hour, hour)) ||
+    (r.status === 'pending' && r.candidates && r.candidates.some(c => c.date === dstr && hoursOverlap(c.hour, hour)))
   ));
+}
+
+function isResourceFreeForLesson(resourceId, weekday, hour, dstr){
+  // 1時間レッスン分、必要な30分ブロックがすべて空いているかを確認
+  const nextHalf = (hour + 0.5) % 24;
+  return isAvailableResource(resourceId, weekday, hour) &&
+    isAvailableResource(resourceId, weekday, nextHalf) &&
+    !isNgDateResource(resourceId, dstr);
 }
 
 function computeCapacity(instructorId, dateObj, hour){
   const wd = isoWeekday(dateObj);
   const dstr = dateKey(dateObj);
   if(instructorId === 'unei'){
-    const anyStaffAvailable = UNEI_STAFF.some(s => {
-      const rid = 'unei_' + s.id;
-      return isAvailableResource(rid, wd, hour) && !isNgDateResource(rid, dstr);
-    });
+    const anyStaffAvailable = UNEI_STAFF.some(s => isResourceFreeForLesson('unei_' + s.id, wd, hour, dstr));
     return anyStaffAvailable ? 1 : 0;
   }
-  return (isAvailableResource(instructorId, wd, hour) && !isNgDateResource(instructorId, dstr)) ? 1 : 0;
+  return isResourceFreeForLesson(instructorId, wd, hour, dstr) ? 1 : 0;
 }
 
 function assignStaffForSlot(dateObj, hour, excludeReqId){
@@ -676,13 +717,10 @@ function assignStaffForSlot(dateObj, hour, excludeReqId){
   const dstr = dateKey(dateObj);
   const usedStaff = new Set(
     requests
-      .filter(r => r.instructorId === 'unei' && r.status === 'confirmed' && r.date === dstr && r.hour === hour && r.id !== excludeReqId && r.assignedStaff)
+      .filter(r => r.instructorId === 'unei' && r.status === 'confirmed' && r.date === dstr && hoursOverlap(r.hour, hour) && r.id !== excludeReqId && r.assignedStaff)
       .map(r => r.assignedStaff)
   );
-  const staff = UNEI_STAFF.find(s => {
-    const rid = 'unei_' + s.id;
-    return isAvailableResource(rid, wd, hour) && !isNgDateResource(rid, dstr) && !usedStaff.has(s.name);
-  });
+  const staff = UNEI_STAFF.find(s => isResourceFreeForLesson('unei_' + s.id, wd, hour, dstr) && !usedStaff.has(s.name));
   return staff ? staff.name : '';
 }
 
@@ -757,7 +795,8 @@ function renderSchedule(){
 
   const displayHours = showLateHoursSchedule ? BASE_HOURS.concat(LATE_HOURS) : BASE_HOURS;
   displayHours.forEach(hour => {
-    html += `<tr><td class="hour-label">${hour}:00</td>`;
+    const isOnHour = hour % 1 === 0;
+    html += `<tr class="${isOnHour ? 'hour-boundary' : ''}"><td class="hour-label${isOnHour ? ' on-hour' : ''}">${formatHour(hour)}</td>`;
     dates.forEach(d => {
       const dstr = dateKey(d);
       const capacity = computeCapacity(activeInstructor, d, hour);
@@ -787,7 +826,7 @@ function renderSchedule(){
       }else if(isSelected){
         cls += ' candidate';
         const idx = selectedCandidates.findIndex(c => c.date === dstr && c.hour === hour);
-        label = `候補${idx+1}`;
+        label = ['①','②','③'][idx];
       }else{
         label = isUneiViewer ? '空き' : '◎';
       }
@@ -809,7 +848,7 @@ function renderCandidateBar(){
   document.getElementById('candidate-count-label').textContent = `候補: ${selectedCandidates.length}/3`;
   document.getElementById('candidate-chips').innerHTML = selectedCandidates.map((c, i) => {
     const d = new Date(c.date + 'T00:00:00');
-    return `<span class="candidate-chip">${CANDIDATE_LABEL[i]}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${c.hour}:00</span>`;
+    return `<span class="candidate-chip">${CANDIDATE_LABEL[i]}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(c.hour)}</span>`;
   }).join('');
 }
 
@@ -847,9 +886,9 @@ function renderList(){
   }
 
   function sortKey(r){
-    if(r.status === 'confirmed') return r.date + String(r.hour).padStart(2,'0');
+    if(r.status === 'confirmed') return r.date + hourSortKey(r.hour);
     const first = r.candidates && r.candidates[0];
-    return first ? first.date + String(first.hour).padStart(2,'0') : '9999';
+    return first ? first.date + hourSortKey(first.hour) : '9999';
   }
   const sorted = [...base].sort((a,b) => sortKey(a).localeCompare(sortKey(b)));
 
@@ -858,13 +897,13 @@ function renderList(){
     let dateTimeLabel, statusLabel, badgeClass;
     if(r.status === 'confirmed'){
       const d = new Date(r.date + 'T00:00:00');
-      dateTimeLabel = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${r.hour}:00〜${r.hour+1}:00`;
+      dateTimeLabel = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(r.hour)}〜${formatHour(r.hour+1)}`;
       statusLabel = '確定';
       badgeClass = 'confirmed';
     }else{
       dateTimeLabel = (r.candidates || []).map((c,i) => {
         const d = new Date(c.date + 'T00:00:00');
-        return `${CANDIDATE_LABEL[i]} ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)})${c.hour}:00`;
+        return `${CANDIDATE_LABEL[i]} ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)})${formatHour(c.hour)}`;
       }).join(' / ');
       statusLabel = '申請中';
       badgeClass = 'pending';
@@ -952,7 +991,7 @@ function renderMonthCalendar(){
     dayReqs = dayReqs.sort((a,b) => a.hour - b.hour);
     const events = dayReqs.map(r => {
       const ins = instructorOf(r.instructorId);
-      return `<div class="month-event" style="background:${ins ? ins.color : '#999'}; color:${ins && ins.dark ? 'var(--brown)' : '#fff'};" title="${escapeHtml(ins ? ins.name : '')}${r.assignedStaff ? ' / ' + escapeHtml(r.assignedStaff) : ''} ・ ${escapeHtml(r.course || '')}">${r.hour}:00 ${escapeHtml(r.name)}</div>`;
+      return `<div class="month-event" style="background:${ins ? ins.color : '#999'}; color:${ins && ins.dark ? 'var(--brown)' : '#fff'};" title="${escapeHtml(ins ? ins.name : '')}${r.assignedStaff ? ' / ' + escapeHtml(r.assignedStaff) : ''} ・ ${escapeHtml(r.course || '')}">${formatHour(r.hour)} ${escapeHtml(r.name)}</div>`;
     }).join('');
     return `<div class="month-cell${inMonth ? '' : ' other-month'}${isToday ? ' today' : ''}"><div class="daynum">${d.getDate()}</div>${events}</div>`;
   }).join('');
@@ -978,7 +1017,7 @@ function openCandidateApplyModal(){
   const isLesson = activeInstructor !== 'unei';
   const candidateLines = selectedCandidates.map((c,i) => {
     const d = new Date(c.date + 'T00:00:00');
-    return `<div class="info-row"><b>${CANDIDATE_LABEL[i]}:</b> ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${c.hour}:00〜${c.hour+1}:00</div>`;
+    return `<div class="info-row"><b>${CANDIDATE_LABEL[i]}:</b> ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(c.hour)}〜${formatHour(c.hour+1)}</div>`;
   }).join('');
   const teacherCheckHtml = isLesson ? `
     <div style="background:${ins.color}; color:${ins.dark ? 'var(--brown)' : '#fff'}; border-radius:14px; padding:12px 14px; margin-bottom:12px; font-weight:800; font-size:15px; text-align:center;">
@@ -1040,7 +1079,7 @@ function openCellInfoModal(dstr, hour){
   const ins = instructorOf(activeInstructor);
   const d = new Date(dstr + 'T00:00:00');
   const cellReqs = getCellRequests(activeInstructor, d, hour);
-  const dateLabel = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${hour}:00〜${hour+1}:00`;
+  const dateLabel = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(hour)}〜${formatHour(hour+1)}`;
   const rowsHtml = cellReqs.map(r => `
     <div class="info-row"><b>${escapeHtml(r.name)}</b> ・ ${escapeHtml(r.course || '未選択')} ・ ${r.status === 'confirmed' ? '確定' : '申請中'}</div>
   `).join('') || '<div class="info-row">情報がありません。</div>';
@@ -1067,7 +1106,7 @@ function openCandidateApprovalModal(reqId){
     return `
       <label class="candidate-option">
         <input type="radio" name="cand-choice" value="${i}" ${i===0 ? 'checked' : ''}>
-        <span>${CANDIDATE_LABEL[i]}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${c.hour}:00〜${c.hour+1}:00</span>
+        <span>${CANDIDATE_LABEL[i]}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(c.hour)}〜${formatHour(c.hour+1)}</span>
       </label>
     `;
   }).join('');
@@ -1147,7 +1186,7 @@ function openResourceAvailability(resourceId, displayName){
 
   function syncStateFromDom(){
     availabilityContentEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      const wd = cb.dataset.wd, hour = parseInt(cb.dataset.hour, 10);
+      const wd = cb.dataset.wd, hour = parseFloat(cb.dataset.hour);
       if(cb.checked) workingState[wd].add(hour); else workingState[wd].delete(hour);
     });
   }
@@ -1155,11 +1194,12 @@ function openResourceAvailability(resourceId, displayName){
   function buildRows(){
     const displayHours = showLateAvail ? BASE_HOURS.concat(LATE_HOURS) : BASE_HOURS;
     return displayHours.map(hour => {
+      const isOnHour = hour % 1 === 0;
       let cells = WEEKDAYS.map(wd => {
         const checked = workingState[wd].has(hour);
-        return `<td><input type="checkbox" data-wd="${wd}" data-hour="${hour}" ${checked ? 'checked' : ''}></td>`;
+        return `<td style="${isOnHour ? 'box-shadow:0 -2px 0 rgba(107,66,38,0.12);' : ''}"><input type="checkbox" data-wd="${wd}" data-hour="${hour}" ${checked ? 'checked' : ''}></td>`;
       }).join('');
-      return `<tr><td class="row-toggle" data-hour="${hour}" style="cursor:pointer; text-decoration:underline;">${hour}:00</td>${cells}</tr>`;
+      return `<tr><td class="row-toggle" data-hour="${hour}" style="cursor:pointer; text-decoration:underline; ${isOnHour ? 'font-weight:800; color:var(--brown); box-shadow:0 -2px 0 rgba(107,66,38,0.12);' : ''}">${formatHour(hour)}</td>${cells}</tr>`;
     }).join('');
   }
 
@@ -1171,7 +1211,7 @@ function openResourceAvailability(resourceId, displayName){
   function render(){
     availabilityContentEl.innerHTML = `
       <h2>${escapeHtml(displayName)}の対応可能時間</h2>
-      <p class="sub">チェックが入っている時間帯だけ、生徒が候補として選べるようになります。曜日の見出しや時刻をクリックすると、その列・行を一括でON/OFFできます。</p>
+      <p class="sub">チェックが入っている時間帯だけ、生徒が候補として選べるようになります。レッスンは1時間のため、開始時刻とその30分後の両方にチェックが必要です(例: 10:00から予約できるようにするには10:00と10:30の両方をON)。曜日の見出しや時刻をクリックすると、その列・行を一括でON/OFFできます。</p>
       <div class="modal-actions" style="margin-bottom:8px;">
         <button class="btn btn-ghost" type="button" id="avail-check-all" style="flex:none; padding:6px 14px; font-size:12.5px;">全て選択</button>
         <button class="btn btn-ghost" type="button" id="avail-uncheck-all" style="flex:none; padding:6px 14px; font-size:12.5px;">全て解除</button>
@@ -1416,7 +1456,7 @@ scheduleEl.addEventListener('click', (e) => {
   const cell = e.target.closest('td[data-date]');
   if(!cell) return;
   const dstr = cell.dataset.date;
-  const hour = parseInt(cell.dataset.hour, 10);
+  const hour = parseFloat(cell.dataset.hour);
   const clickable = cell.dataset.clickable === 'true';
   const d = new Date(dstr + 'T00:00:00');
   const cellReqs = getCellRequests(activeInstructor, d, hour);
