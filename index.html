@@ -408,6 +408,48 @@ const PROFILE_KEY = 'mirusuku-student-profile';
 const STUDENT_REGISTRY_KEY = 'mirusuku-student-registry';
 const OPERATOR_PASSCODE = 'mirusuku';
 
+/* ===== GAS(スプレッドシート)接続設定 =====
+   保存先を Google Apps Script のWebアプリURLに切り替える。
+   - GAS_URL      : デプロイで発行された /exec のURL
+   - SHARED_TOKEN : GAS側の SHARED_TOKEN と同じ文字列
+   ※ getAllで一度に読み込み、各データはsaveKeyで個別に保存する。 */
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxKO7-6svmWBUnlT6SqAQgLQWDVjCDdtWhSjzNaoEZA4GeFZAkOKeDwxslB6xZkfmii/exec';
+const SHARED_TOKEN = 'mirusuku-yoyaku-2026';
+
+// 画面読み込み時に getAll の結果をここへ入れておき、各 load 関数が参照する
+let _gasCache = null;
+
+// GASから全データを取得（初回のみ通信し、以後はキャッシュを使う）
+async function gasGetAll(force){
+  if(_gasCache && !force) return _gasCache;
+  const url = GAS_URL + '?action=getAll&token=' + encodeURIComponent(SHARED_TOKEN);
+  const res = await fetch(url);
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'getAll failed');
+  _gasCache = data;
+  return data;
+}
+
+// GASへ1キーを保存
+async function gasSaveKey(key, valueObj){
+  const res = await fetch(GAS_URL, {
+    method: 'POST',
+    // シンプルリクエストにしてCORSプリフライトを避けるため text/plain で送る
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      action: 'saveKey',
+      token: SHARED_TOKEN,
+      key: key,
+      value: JSON.stringify(valueObj)
+    })
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'saveKey failed');
+  // 保存が成功したらキャッシュも更新しておく
+  if(_gasCache) _gasCache[key] = valueObj;
+  return true;
+}
+
 let activeInstructor = INSTRUCTORS[0].id;
 let bookingMode = null; // 'lesson' | 'unei' | null (生徒が選ぶ予約メニュー)
 let weekOffset = 0;
@@ -490,8 +532,8 @@ function formspreeUrl(value){
 
 async function loadRequests(){
   try{
-    const result = await window.storage.get(STORAGE_KEY, true);
-    requests = result ? JSON.parse(result.value) : [];
+    const data = await gasGetAll();
+    requests = Array.isArray(data.requests) ? data.requests : [];
   }catch(e){ requests = []; }
   requests.forEach(r => {
     if(r.status === 'pending' && !r.candidates){
@@ -501,19 +543,18 @@ async function loadRequests(){
 }
 async function saveRequests(){
   try{
-    const ok = await window.storage.set(STORAGE_KEY, JSON.stringify(requests), true);
-    if(!ok) setStatus('保存に失敗しました。もう一度お試しください。');
+    await gasSaveKey('requests', requests);
   }catch(e){ setStatus('保存に失敗しました。もう一度お試しください。'); }
 }
 
 async function loadAvailability(){
   try{
-    const result = await window.storage.get(AVAILABILITY_KEY, true);
-    availability = result ? JSON.parse(result.value) : {};
+    const data = await gasGetAll();
+    availability = (data.availability && typeof data.availability === 'object') ? data.availability : {};
   }catch(e){ availability = {}; }
 }
 async function saveAvailability(){
-  try{ await window.storage.set(AVAILABILITY_KEY, JSON.stringify(availability), true); }
+  try{ await gasSaveKey('availability', availability); }
   catch(e){ setStatus('対応可能時間の保存に失敗しました。'); }
 }
 function isAvailableResource(resourceId, weekday, hour){
@@ -526,12 +567,12 @@ function isAvailableResource(resourceId, weekday, hour){
 
 async function loadNgDates(){
   try{
-    const result = await window.storage.get(NG_DATES_KEY, true);
-    ngDates = result ? JSON.parse(result.value) : {};
+    const data = await gasGetAll();
+    ngDates = (data.ngDates && typeof data.ngDates === 'object') ? data.ngDates : {};
   }catch(e){ ngDates = {}; }
 }
 async function saveNgDates(){
-  try{ await window.storage.set(NG_DATES_KEY, JSON.stringify(ngDates), true); }
+  try{ await gasSaveKey('ngDates', ngDates); }
   catch(e){ setStatus('NG日の保存に失敗しました。'); }
 }
 function isNgDateResource(resourceId, dateStr){
@@ -541,20 +582,20 @@ function isNgDateResource(resourceId, dateStr){
 
 async function loadNotifySettings(){
   try{
-    const result = await window.storage.get(NOTIFY_SETTINGS_KEY, true);
-    if(result) notifySettings = JSON.parse(result.value);
+    const data = await gasGetAll();
+    if(data.notifySettings && typeof data.notifySettings === 'object') notifySettings = data.notifySettings;
   }catch(e){}
 }
 async function saveNotifySettings(){
-  try{ await window.storage.set(NOTIFY_SETTINGS_KEY, JSON.stringify(notifySettings), true); }
+  try{ await gasSaveKey('notifySettings', notifySettings); }
   catch(e){ setStatus('通知設定の保存に失敗しました。'); }
 }
 
 async function loadGoogleSettings(){
   try{
-    const result = await window.storage.get(GOOGLE_SETTINGS_KEY, true);
-    if(result){
-      const parsed = JSON.parse(result.value);
+    const data = await gasGetAll();
+    const parsed = data.googleSettings;
+    if(parsed && typeof parsed === 'object'){
       if(parsed.calendarIds){ googleSettings = parsed; }
       else if(parsed.calendarId){
         googleSettings = { clientId: parsed.clientId || '', calendarIds: {} };
@@ -564,40 +605,35 @@ async function loadGoogleSettings(){
   }catch(e){}
 }
 async function saveGoogleSettings(){
-  try{ await window.storage.set(GOOGLE_SETTINGS_KEY, JSON.stringify(googleSettings), true); }
+  try{ await gasSaveKey('googleSettings', googleSettings); }
   catch(e){ setStatus('Googleカレンダー設定の保存に失敗しました。'); }
   setupTokenClient();
 }
 
 async function loadProfile(){
-  if(!window.storage){
-    setStatus('⚠️ この画面ではデータ保存機能が使えません。Claudeでこのアーティファクトを開いた状態(できれば公開リンク)でお試しください。ダウンロードしたHTMLファイルを直接開いた場合は保存されません。');
-    studentProfile = null;
-    return;
-  }
+  // プロフィールは各自の端末固有情報なので、この端末のブラウザ(localStorage)に保存する。
+  // localStorageはGitHub Pagesでも動くため、次回以降もログイン状態が引き継がれる。
   try{
-    const result = await window.storage.get(PROFILE_KEY, false);
-    studentProfile = result ? JSON.parse(result.value) : null;
+    const raw = localStorage.getItem(PROFILE_KEY);
+    studentProfile = raw ? JSON.parse(raw) : null;
   }catch(e){ studentProfile = null; }
 }
 async function saveProfile(profile){
   studentProfile = profile;
-  if(!window.storage){ setStatus('⚠️ 保存機能が使えない環境のため、プロフィールは次回引き継がれません。'); return; }
-  try{ await window.storage.set(PROFILE_KEY, JSON.stringify(profile), false); }
+  try{ localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }
   catch(e){ setStatus('プロフィールの保存に失敗しました。'); }
 }
 
 async function loadStudentRegistry(){
-  if(!window.storage) return;
   try{
-    const result = await window.storage.get(STUDENT_REGISTRY_KEY, true);
-    studentRegistry = result ? JSON.parse(result.value) : {};
+    const data = await gasGetAll();
+    studentRegistry = (data.studentRegistry && typeof data.studentRegistry === 'object') ? data.studentRegistry : {};
   }catch(e){ studentRegistry = {}; }
 }
 async function upsertStudentRegistry(email, data){
-  if(!email || !window.storage) return;
+  if(!email) return;
   studentRegistry[email] = { ...(studentRegistry[email] || {}), ...data, updatedAt: new Date().toISOString() };
-  try{ await window.storage.set(STUDENT_REGISTRY_KEY, JSON.stringify(studentRegistry), true); }
+  try{ await gasSaveKey('studentRegistry', studentRegistry); }
   catch(e){ /* レジストリの保存に失敗しても致命的ではないため静かに無視 */ }
 }
 
@@ -1620,6 +1656,13 @@ googleOverlayEl.addEventListener('click', (e) => { if(e.target === googleOverlay
 
 (async function init(){
   setStatus('読み込み中…');
+  // 先にGASから全データを1回だけ取得してキャッシュしておく（通信を1回に集約）
+  try{
+    await gasGetAll();
+  }catch(e){
+    setStatus('⚠️ データの読み込みに失敗しました。通信環境を確認して、ページを再読み込みしてください。');
+  }
+  // プロフィールは端末ローカル、その他はキャッシュから読む（ここでは通信は発生しない）
   await Promise.all([loadProfile(), loadRequests(), loadAvailability(), loadNgDates(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
   setStatus('');
   setupTokenClient();
