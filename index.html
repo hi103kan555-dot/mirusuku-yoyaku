@@ -169,7 +169,11 @@
   .candidate-option{ display:flex; align-items:center; gap:8px; background:#fff; border:2px solid var(--line); border-radius:12px; padding:10px 12px; margin-bottom:8px; font-size:13.5px; }
   .candidate-option input{ width:auto; margin:0; }
 
-  .avail-table{ width:100%; border-collapse:collapse; font-size:12px; margin-bottom:12px; }
+  .modal.wide{ max-width:680px; }
+  .avail-weeknav{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+  .avail-weeknav .btn{ flex:none; padding:6px 12px; font-size:12.5px; }
+  .avail-range{ font-size:13px; font-weight:800; color:var(--brown); }
+  .avail-table{ width:100%; border-collapse:collapse; font-size:12px; margin-bottom:8px; }
   .avail-table th, .avail-table td{ text-align:center; padding:4px; border-bottom:1px solid var(--line); }
   .avail-table th{ color:var(--brown-soft); font-weight:700; }
   .avail-table td:first-child, .avail-table th:first-child{ text-align:left; color:var(--brown-soft); font-weight:700; }
@@ -273,6 +277,7 @@
         <input type="password" id="gate-passcode" placeholder="運営パスコード">
       </div>
       <p class="help" id="gate-passcode-help" style="display:none;"></p>
+      <p class="help" id="gate-error" style="display:none; color:#d64545; font-weight:700;"></p>
       <button class="btn btn-primary" id="gate-submit" style="flex:none; padding:10px 24px;">はじめる</button>
     </div>
   </div>
@@ -281,7 +286,10 @@
     <div class="card">
       <div class="profile-bar">
         <span><b id="profile-name"></b> さん(<span id="profile-email"></span>) としてログイン中</span>
-        <a id="profile-edit">プロフィールを変更</a>
+        <span style="display:flex; gap:14px;">
+          <a id="profile-edit">プロフィールを変更</a>
+          <a id="logout-btn">ログアウト</a>
+        </span>
       </div>
     </div>
 
@@ -310,7 +318,7 @@
         </div>
       </div>
 
-      <p class="help" style="margin-top:-4px;">空いているマスをクリックすると候補として選べます(最大3件・第一〜第三希望)。</p>
+      <p class="help" style="margin-top:-4px;">空いているマスをクリックすると候補として選べます(最大3件・第1〜第3希望)。</p>
 
       <div class="grid-wrap">
         <table class="schedule" id="schedule"></table>
@@ -396,12 +404,11 @@ const LATE_HOURS = buildHourRange(21, 10);
 const HOURS = BASE_HOURS;
 const WEEKDAYS = [1,2,3,4,5,6,7];
 const WEEKDAY_LABEL = {1:'月',2:'火',3:'水',4:'木',5:'金',6:'土',7:'日'};
-const CANDIDATE_LABEL = ['第一希望','第二希望','第三希望'];
+const CANDIDATE_LABEL = ['第1希望','第2希望','第3希望'];
 const COURSES = ['ライトコース(月2回面談)','レギュラーコース(月4回面談)','ロングコース(半年コース)','初回運営面談','中間運営面談'];
 
 const STORAGE_KEY = 'mirusuku-schedule-v3';
-const AVAILABILITY_KEY = 'mirusuku-availability';
-const NG_DATES_KEY = 'mirusuku-ng-dates';
+const OPEN_SLOTS_KEY = 'mirusuku-open-slots';
 const NOTIFY_SETTINGS_KEY = 'mirusuku-notify-settings';
 const GOOGLE_SETTINGS_KEY = 'mirusuku-google-settings';
 const PROFILE_KEY = 'mirusuku-student-profile';
@@ -457,8 +464,7 @@ let monthOffset = 0;
 let monthInstructorFilter = 'all';
 let monthFilterPopulated = false;
 let requests = [];
-let availability = {};
-let ngDates = {};
+let openSlots = {};
 let notifySettings = { endpoint:'' };
 let googleSettings = { clientId:'', calendarIds:{} };
 let studentProfile = null;
@@ -547,37 +553,82 @@ async function saveRequests(){
   }catch(e){ setStatus('保存に失敗しました。もう一度お試しください。'); }
 }
 
-async function loadAvailability(){
-  try{
-    const data = await gasGetAll();
-    availability = (data.availability && typeof data.availability === 'object') ? data.availability : {};
-  }catch(e){ availability = {}; }
+/* ===== 対応可能枠(日付ベースの足し算方式) =====
+   考え方: 「基本はすべて予約不可。講師がONにした日付×時刻の枠だけ予約できる」
+   メモリ上の形: openSlots = { リソースID: { 'YYYY-MM-DD': [10, 10.5, 11, ...] } }
+   スプレッドシート上の形: 1日48コマ(30分刻み)のON/OFFを12桁の16進文字列に圧縮して保存する。
+     先頭ビットが0:00、最後のビットが23:30。例) 10:00〜12:00がONなら "00003e0000000"…のような形。
+     セル文字数を節約するためで、読み込み側は [10,10.5] のような数値配列でも解釈できる。 */
+
+// 数値の時刻配列 → 12桁の16進文字列
+function encodeDayHours(hours){
+  const bits = new Array(48).fill('0');
+  (hours || []).forEach(h => {
+    const i = Math.round(Number(h) * 2);
+    if(i >= 0 && i < 48) bits[i] = '1';
+  });
+  let hex = '';
+  for(let i = 0; i < 48; i += 4) hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16);
+  return hex;
 }
-async function saveAvailability(){
-  try{ await gasSaveKey('availability', availability); }
-  catch(e){ setStatus('対応可能時間の保存に失敗しました。'); }
-}
-function isAvailableResource(resourceId, weekday, hour){
-  const map = availability[resourceId];
-  if(!map) return true;
-  const arr = map[weekday];
-  if(!arr) return false;
-  return arr.includes(hour);
+// 保存形式(16進文字列 or 数値配列) → 数値の時刻配列
+function decodeDayHours(value){
+  if(Array.isArray(value)){
+    return value.map(Number).filter(n => !isNaN(n)).sort((a,b) => a - b);
+  }
+  if(typeof value !== 'string') return [];
+  const s = value.trim();
+  if(!/^[0-9a-fA-F]{12}$/.test(s)) return [];
+  let bits = '';
+  for(const ch of s) bits += parseInt(ch, 16).toString(2).padStart(4, '0');
+  const out = [];
+  for(let i = 0; i < 48; i++) if(bits[i] === '1') out.push(i / 2);
+  return out;
 }
 
-async function loadNgDates(){
+async function loadOpenSlots(){
+  openSlots = {};
   try{
     const data = await gasGetAll();
-    ngDates = (data.ngDates && typeof data.ngDates === 'object') ? data.ngDates : {};
-  }catch(e){ ngDates = {}; }
+    const raw = (data.openSlots && typeof data.openSlots === 'object') ? data.openSlots : {};
+    Object.keys(raw).forEach(resourceId => {
+      const days = raw[resourceId];
+      if(!days || typeof days !== 'object') return;
+      const map = {};
+      Object.keys(days).forEach(dstr => {
+        const hours = decodeDayHours(days[dstr]);
+        if(hours.length) map[dstr] = hours;
+      });
+      openSlots[resourceId] = map;
+    });
+  }catch(e){ openSlots = {}; }
 }
-async function saveNgDates(){
-  try{ await gasSaveKey('ngDates', ngDates); }
-  catch(e){ setStatus('NG日の保存に失敗しました。'); }
+async function saveOpenSlots(){
+  const payload = {};
+  Object.keys(openSlots).forEach(resourceId => {
+    const days = openSlots[resourceId] || {};
+    const encoded = {};
+    Object.keys(days).sort().forEach(dstr => {
+      const hex = encodeDayHours(days[dstr]);
+      if(!/^0+$/.test(hex)) encoded[dstr] = hex;
+    });
+    if(Object.keys(encoded).length) payload[resourceId] = encoded;
+  });
+  try{ await gasSaveKey('openSlots', payload); }
+  catch(e){ setStatus('対応可能枠の保存に失敗しました。'); }
 }
-function isNgDateResource(resourceId, dateStr){
-  const arr = ngDates[resourceId];
-  return arr ? arr.includes(dateStr) : false;
+// その日・その時刻の枠が「予約可能としてONにされているか」
+function isOpenSlot(resourceId, dateStr, hour){
+  const days = openSlots[resourceId];
+  if(!days) return false;
+  const arr = days[dateStr];
+  return arr ? arr.includes(hour) : false;
+}
+// 日付文字列に日数を足す('2026-08-04' → '2026-08-05')
+function shiftDateStr(dateStr, days){
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  return dateKey(d);
 }
 
 async function loadNotifySettings(){
@@ -760,33 +811,33 @@ function getCellRequests(instructorId, dateObj, hour){
   ));
 }
 
-function isResourceFreeForLesson(resourceId, weekday, hour, dstr){
-  // 1時間レッスン分、必要な30分ブロックがすべて空いているかを確認
-  const nextHalf = (hour + 0.5) % 24;
-  return isAvailableResource(resourceId, weekday, hour) &&
-    isAvailableResource(resourceId, weekday, nextHalf) &&
-    !isNgDateResource(resourceId, dstr);
+function isResourceFreeForLesson(resourceId, dstr, hour){
+  // 1時間レッスン分、必要な30分ブロック2つが両方ONになっているかを確認
+  // (23:30開始なら、翌日0:00の枠も必要になる)
+  const raw = hour + 0.5;
+  const nextHour = raw % 24;
+  const nextDate = raw >= 24 ? shiftDateStr(dstr, 1) : dstr;
+  return isOpenSlot(resourceId, dstr, hour) &&
+    isOpenSlot(resourceId, nextDate, nextHour);
 }
 
 function computeCapacity(instructorId, dateObj, hour){
-  const wd = isoWeekday(dateObj);
   const dstr = dateKey(dateObj);
   if(instructorId === 'unei'){
-    const anyStaffAvailable = UNEI_STAFF.some(s => isResourceFreeForLesson('unei_' + s.id, wd, hour, dstr));
+    const anyStaffAvailable = UNEI_STAFF.some(s => isResourceFreeForLesson('unei_' + s.id, dstr, hour));
     return anyStaffAvailable ? 1 : 0;
   }
-  return isResourceFreeForLesson(instructorId, wd, hour, dstr) ? 1 : 0;
+  return isResourceFreeForLesson(instructorId, dstr, hour) ? 1 : 0;
 }
 
 function assignStaffForSlot(dateObj, hour, excludeReqId){
-  const wd = isoWeekday(dateObj);
   const dstr = dateKey(dateObj);
   const usedStaff = new Set(
     requests
       .filter(r => r.instructorId === 'unei' && r.status === 'confirmed' && r.date === dstr && hoursOverlap(r.hour, hour) && r.id !== excludeReqId && r.assignedStaff)
       .map(r => r.assignedStaff)
   );
-  const staff = UNEI_STAFF.find(s => isResourceFreeForLesson('unei_' + s.id, wd, hour, dstr) && !usedStaff.has(s.name));
+  const staff = UNEI_STAFF.find(s => isResourceFreeForLesson('unei_' + s.id, dstr, hour) && !usedStaff.has(s.name));
   return staff ? staff.name : '';
 }
 
@@ -1300,121 +1351,164 @@ function openSettings(){
 function closeSettings(){ settingsOverlayEl.classList.remove('open'); settingsContentEl.innerHTML = ''; }
 
 function openResourceAvailability(resourceId, displayName){
-  const current = availability[resourceId] || {};
-  let workingNgDates = [...(ngDates[resourceId] || [])].sort();
+  // 編集中の状態は { 'YYYY-MM-DD': Set<時刻> } で保持する。
+  // 週を移動しても消えないよう、保存ボタンを押すまでここに溜めておく。
+  const working = {};
+  const stored = openSlots[resourceId] || {};
+  Object.keys(stored).forEach(dstr => working[dstr] = new Set(stored[dstr]));
+
+  let availWeekOffset = 0;
   let showLateAvail = false;
+  const todayStr = dateKey(new Date());
 
-  // 現在チェックされている状態をDOMから読み取って保持(トグルで再描画しても入力が消えないように)
-  const workingState = {};
-  WEEKDAYS.forEach(wd => {
-    workingState[wd] = new Set(current[wd] ? current[wd] : BASE_HOURS);
-  });
-
+  function slotsOf(dstr){
+    if(!working[dstr]) working[dstr] = new Set();
+    return working[dstr];
+  }
+  function countOpen(){
+    return Object.keys(working).reduce((n, d) => n + working[d].size, 0);
+  }
+  // 画面のチェック状態を working に取り込む(再描画で入力が消えないように)
   function syncStateFromDom(){
-    availabilityContentEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      const wd = cb.dataset.wd, hour = parseFloat(cb.dataset.hour);
-      if(cb.checked) workingState[wd].add(hour); else workingState[wd].delete(hour);
+    availabilityContentEl.querySelectorAll('input[type="checkbox"][data-date]').forEach(cb => {
+      const set = slotsOf(cb.dataset.date);
+      const hour = parseFloat(cb.dataset.hour);
+      if(cb.checked) set.add(hour); else set.delete(hour);
     });
   }
 
-  function buildRows(){
+  function buildRows(dates){
     const displayHours = showLateAvail ? BASE_HOURS.concat(LATE_HOURS) : BASE_HOURS;
     return displayHours.map(hour => {
       const isOnHour = hour % 1 === 0;
-      let cells = WEEKDAYS.map(wd => {
-        const checked = workingState[wd].has(hour);
-        return `<td style="${isOnHour ? 'box-shadow:0 -2px 0 rgba(107,66,38,0.12);' : ''}"><input type="checkbox" data-wd="${wd}" data-hour="${hour}" ${checked ? 'checked' : ''}></td>`;
+      const cells = dates.map(d => {
+        const dstr = dateKey(d);
+        const isPast = dstr < todayStr;
+        const checked = working[dstr] && working[dstr].has(hour);
+        return `<td style="${isOnHour ? 'box-shadow:0 -2px 0 rgba(107,66,38,0.12);' : ''}${isPast ? 'opacity:0.35;' : ''}"><input type="checkbox" data-date="${dstr}" data-hour="${hour}" ${checked ? 'checked' : ''} ${isPast ? 'disabled' : ''}></td>`;
       }).join('');
-      return `<tr><td class="row-toggle" data-hour="${hour}" style="cursor:pointer; text-decoration:underline; ${isOnHour ? 'font-weight:800; color:var(--brown); box-shadow:0 -2px 0 rgba(107,66,38,0.12);' : ''}">${formatHour(hour)}</td>${cells}</tr>`;
+      return `<tr><td class="row-toggle" data-hour="${hour}" style="cursor:pointer; text-decoration:underline; white-space:nowrap; ${isOnHour ? 'font-weight:800; color:var(--brown); box-shadow:0 -2px 0 rgba(107,66,38,0.12);' : ''}">${formatHour(hour)}</td>${cells}</tr>`;
     }).join('');
   }
 
-  function ngListHtml(){
-    if(workingNgDates.length === 0) return '<p class="help" style="margin-top:0;">まだNG日は登録されていません。</p>';
-    return workingNgDates.map(d => `<div class="res-item"><span>${escapeHtml(d)}</span><button type="button" data-ng-remove="${escapeHtml(d)}">×</button></div>`).join('');
-  }
-
   function render(){
+    const dates = getWeekDates(availWeekOffset);
+    const rangeLabel = `${dates[0].getMonth()+1}/${dates[0].getDate()} 〜 ${dates[6].getMonth()+1}/${dates[6].getDate()}`;
+    const headCells = dates.map(d => {
+      const dstr = dateKey(d);
+      const isPast = dstr < todayStr;
+      const isToday = dstr === todayStr;
+      return `<th class="col-toggle" data-date="${dstr}" style="cursor:pointer; text-decoration:underline; white-space:nowrap; ${isPast ? 'opacity:0.4;' : ''}${isToday ? 'color:var(--brown);' : ''}">${d.getMonth()+1}/${d.getDate()}<br>(${weekdayJp(d)})</th>`;
+    }).join('');
+
     availabilityContentEl.innerHTML = `
       <h2>${escapeHtml(displayName)}の対応可能時間</h2>
-      <p class="sub">チェックが入っている時間帯だけ、生徒が候補として選べるようになります。レッスンは1時間のため、開始時刻とその30分後の両方にチェックが必要です(例: 10:00から予約できるようにするには10:00と10:30の両方をON)。曜日の見出しや時刻をクリックすると、その列・行を一括でON/OFFできます。</p>
-      <div class="modal-actions" style="margin-bottom:8px;">
-        <button class="btn btn-ghost" type="button" id="avail-check-all" style="flex:none; padding:6px 14px; font-size:12.5px;">全て選択</button>
-        <button class="btn btn-ghost" type="button" id="avail-uncheck-all" style="flex:none; padding:6px 14px; font-size:12.5px;">全て解除</button>
+      <p class="sub">チェックを入れた日付・時刻の枠だけが、生徒の画面で予約できるようになります(チェックがない枠はすべて予約不可)。レッスンは1時間のため、開始時刻とその30分後の両方にチェックが必要です(例: 10:00から予約できるようにするには10:00と10:30の両方をON)。日付の見出しや時刻をクリックすると、その列・行をまとめてON/OFFできます。</p>
+      <div class="avail-weeknav">
+        <button class="btn btn-ghost" type="button" id="avail-prev-week">← 前の週</button>
+        <span class="avail-range">${rangeLabel}</span>
+        <button class="btn btn-ghost" type="button" id="avail-next-week">次の週 →</button>
+      </div>
+      <div class="modal-actions" style="margin-bottom:8px; flex-wrap:wrap;">
+        <button class="btn btn-ghost" type="button" id="avail-check-all" style="flex:none; padding:6px 14px; font-size:12.5px;">この週を全てON</button>
+        <button class="btn btn-ghost" type="button" id="avail-uncheck-all" style="flex:none; padding:6px 14px; font-size:12.5px;">この週を全てOFF</button>
+        <button class="btn btn-ghost" type="button" id="avail-copy-prev" style="flex:none; padding:6px 14px; font-size:12.5px;">前の週からコピー</button>
+        <button class="btn btn-ghost" type="button" id="avail-this-week" style="flex:none; padding:6px 14px; font-size:12.5px;">今週へ戻る</button>
         <button class="btn btn-ghost" type="button" id="avail-toggle-late" style="flex:none; padding:6px 14px; font-size:12.5px;">${showLateAvail ? '🌙 深夜帯を隠す' : '🌙 深夜帯を表示'}</button>
       </div>
       <div style="overflow-x:auto;">
         <table class="avail-table">
-          <thead><tr><th></th>${WEEKDAYS.map(wd => `<th class="col-toggle" data-wd="${wd}" style="cursor:pointer; text-decoration:underline;">${WEEKDAY_LABEL[wd]}</th>`).join('')}</tr></thead>
-          <tbody>${buildRows()}</tbody>
+          <thead><tr><th></th>${headCells}</tr></thead>
+          <tbody>${buildRows(dates)}</tbody>
         </table>
       </div>
-      <label>NG日を追加(その日は終日対応不可になります)</label>
-      <div class="res-add" style="margin-bottom:10px;">
-        <input type="date" id="ng-date-input">
-        <button class="btn btn-ghost" type="button" id="ng-date-add" style="flex:none; padding:10px 16px;">追加</button>
-      </div>
-      <div id="ng-date-list">${ngListHtml()}</div>
+      <p class="help" style="margin-top:0;">現在ONにしている枠: 全期間で ${countOpen()} コマ。過去の日付は編集できません。</p>
       <div class="modal-actions">
         <button class="btn btn-primary" id="a-save">保存する</button>
         <button class="btn btn-ghost" id="a-close">閉じる</button>
       </div>
     `;
+
+    function activeBoxes(selector){
+      return [...availabilityContentEl.querySelectorAll(selector)].filter(cb => !cb.disabled);
+    }
+
+    document.getElementById('avail-prev-week').addEventListener('click', () => {
+      syncStateFromDom(); availWeekOffset--; render();
+    });
+    document.getElementById('avail-next-week').addEventListener('click', () => {
+      syncStateFromDom(); availWeekOffset++; render();
+    });
+    document.getElementById('avail-this-week').addEventListener('click', () => {
+      syncStateFromDom(); availWeekOffset = 0; render();
+    });
     document.getElementById('avail-check-all').addEventListener('click', () => {
-      availabilityContentEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+      activeBoxes('input[type="checkbox"][data-date]').forEach(cb => cb.checked = true);
     });
     document.getElementById('avail-uncheck-all').addEventListener('click', () => {
-      availabilityContentEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+      activeBoxes('input[type="checkbox"][data-date]').forEach(cb => cb.checked = false);
     });
     document.getElementById('avail-toggle-late').addEventListener('click', () => {
+      syncStateFromDom(); showLateAvail = !showLateAvail; render();
+    });
+    // 1週間前の同じ曜日の設定を、この週にそのまま写す
+    document.getElementById('avail-copy-prev').addEventListener('click', () => {
       syncStateFromDom();
-      showLateAvail = !showLateAvail;
+      const hasSource = dates.some(d => {
+        const src = working[shiftDateStr(dateKey(d), -7)];
+        return src && src.size > 0;
+      });
+      if(!hasSource){
+        alert('前の週にはONの枠がないため、コピーできませんでした。');
+        return;
+      }
+      dates.forEach(d => {
+        const dstr = dateKey(d);
+        if(dstr < todayStr) return;
+        const srcHours = working[shiftDateStr(dstr, -7)];
+        working[dstr] = new Set(srcHours ? [...srcHours] : []);
+      });
       render();
     });
+    // 日付の見出し = その日の縦1列をまとめてON/OFF
     availabilityContentEl.querySelectorAll('.col-toggle').forEach(th => {
       th.addEventListener('click', () => {
-        const wd = th.dataset.wd;
-        const boxes = availabilityContentEl.querySelectorAll(`input[data-wd="${wd}"]`);
-        const allChecked = [...boxes].every(cb => cb.checked);
-      boxes.forEach(cb => cb.checked = !allChecked);
+        const boxes = activeBoxes(`input[data-date="${th.dataset.date}"]`);
+        if(boxes.length === 0) return;
+        const allChecked = boxes.every(cb => cb.checked);
+        boxes.forEach(cb => cb.checked = !allChecked);
+      });
     });
-  });
-  availabilityContentEl.querySelectorAll('.row-toggle').forEach(td => {
-    td.addEventListener('click', () => {
-      const hour = td.dataset.hour;
-      const boxes = availabilityContentEl.querySelectorAll(`input[data-hour="${hour}"]`);
-      const allChecked = [...boxes].every(cb => cb.checked);
-      boxes.forEach(cb => cb.checked = !allChecked);
+    // 時刻の見出し = その時刻の横1行(この週の7日分)をまとめてON/OFF
+    availabilityContentEl.querySelectorAll('.row-toggle').forEach(td => {
+      td.addEventListener('click', () => {
+        const boxes = activeBoxes(`input[data-hour="${td.dataset.hour}"]`);
+        if(boxes.length === 0) return;
+        const allChecked = boxes.every(cb => cb.checked);
+        boxes.forEach(cb => cb.checked = !allChecked);
+      });
     });
-  });
-  document.getElementById('ng-date-add').addEventListener('click', () => {
-    const val = document.getElementById('ng-date-input').value;
-    if(!val) return;
-    if(!workingNgDates.includes(val)){ workingNgDates.push(val); workingNgDates.sort(); }
-    document.getElementById('ng-date-list').innerHTML = ngListHtml();
-  });
-  document.getElementById('ng-date-list').addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-ng-remove]');
-    if(!btn) return;
-    workingNgDates = workingNgDates.filter(d => d !== btn.dataset.ngRemove);
-    document.getElementById('ng-date-list').innerHTML = ngListHtml();
-  });
-  document.getElementById('a-save').addEventListener('click', async () => {
-    syncStateFromDom();
-    const map = {};
-    WEEKDAYS.forEach(wd => map[wd] = [...workingState[wd]].sort((a,b) => a - b));
-    availability[resourceId] = map;
-    ngDates[resourceId] = workingNgDates;
-    await saveAvailability();
-    await saveNgDates();
-    setStatus('対応可能時間とNG日を保存しました。');
-    closeAvailability();
-    renderSchedule();
-  });
-  document.getElementById('a-close').addEventListener('click', closeAvailability);
+    document.getElementById('a-save').addEventListener('click', async () => {
+      syncStateFromDom();
+      // 1か月以上前の設定は、もう使わないので保存時に整理する
+      const cutoff = shiftDateStr(todayStr, -31);
+      const map = {};
+      Object.keys(working).sort().forEach(dstr => {
+        if(dstr < cutoff) return;
+        const arr = [...working[dstr]].sort((a,b) => a - b);
+        if(arr.length) map[dstr] = arr;
+      });
+      openSlots[resourceId] = map;
+      await saveOpenSlots();
+      setStatus('対応可能枠を保存しました。');
+      closeAvailability();
+      renderSchedule();
+    });
+    document.getElementById('a-close').addEventListener('click', closeAvailability);
   }
 
   render();
+  availabilityContentEl.classList.add('wide');
   availabilityOverlayEl.classList.add('open');
 }
 
@@ -1441,7 +1535,7 @@ function openAvailability(){
   const ins = instructorOf(activeInstructor);
   openResourceAvailability(activeInstructor, ins.name);
 }
-function closeAvailability(){ availabilityOverlayEl.classList.remove('open'); availabilityContentEl.innerHTML = ''; }
+function closeAvailability(){ availabilityOverlayEl.classList.remove('open'); availabilityContentEl.classList.remove('wide'); availabilityContentEl.innerHTML = ''; }
 
 function openGoogle(){
   const calendarFields = INSTRUCTORS.map(i => `
@@ -1519,15 +1613,22 @@ document.getElementById('role-unei').addEventListener('click', () => {
   helpEl.textContent = '運営パスコードを入力してください。';
 });
 
+function setGateError(msg){
+  const el = document.getElementById('gate-error');
+  el.textContent = msg || '';
+  el.style.display = msg ? 'block' : 'none';
+}
+
 document.getElementById('gate-submit').addEventListener('click', async () => {
   const name = document.getElementById('gate-name').value.trim();
   const email = document.getElementById('gate-email').value.trim();
-  if(!name || !email){ setStatus('お名前とメールアドレスを入力してください。'); return; }
+  if(!name || !email){ setGateError('お名前とメールアドレスを入力してください。'); return; }
   if(gateRole === 'unei'){
     const passcode = document.getElementById('gate-passcode').value;
-    if(!passcode){ setStatus('運営パスコードを入力してください。'); return; }
-    if(passcode !== OPERATOR_PASSCODE){ setStatus('運営パスコードが違います。'); return; }
+    if(!passcode){ setGateError('運営パスコードを入力してください。'); return; }
+    if(passcode !== OPERATOR_PASSCODE){ setGateError('運営パスコードが違います。もう一度ご確認ください。'); return; }
   }
+  setGateError('');
   await saveProfile({ name, email, role: gateRole });
   await upsertStudentRegistry(email, { name });
   setStatus('');
@@ -1545,11 +1646,52 @@ document.getElementById('gate-email').addEventListener('blur', () => {
   }
 });
 
-document.getElementById('profile-edit').addEventListener('click', () => {
-  document.getElementById('gate-name').value = studentProfile.name;
-  document.getElementById('gate-email').value = studentProfile.email;
-  const roleBtn = studentProfile.role === 'unei' ? document.getElementById('role-unei') : document.getElementById('role-student');
-  roleBtn.click();
+function openProfileEdit(){
+  modalEl.innerHTML = `
+    <h2>プロフィールを変更</h2>
+    <p class="sub" style="margin-bottom:12px;">お名前とメールアドレスを変更できます。</p>
+    <label>お名前</label>
+    <input type="text" id="pe-name" value="${escapeHtml(studentProfile ? studentProfile.name : '')}">
+    <label>メールアドレス</label>
+    <input type="email" id="pe-email" value="${escapeHtml(studentProfile ? studentProfile.email : '')}">
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="pe-save">保存する</button>
+      <button class="btn btn-ghost" id="pe-close">閉じる</button>
+    </div>
+  `;
+  document.getElementById('pe-save').addEventListener('click', async () => {
+    const name = document.getElementById('pe-name').value.trim();
+    const email = document.getElementById('pe-email').value.trim();
+    if(!name || !email){ setStatus('お名前とメールアドレスは必須です。'); return; }
+    // 役割(生徒/運営)は変更せず、名前・メールのみ更新する
+    await saveProfile({ ...studentProfile, name, email });
+    closeModal();
+    document.getElementById('profile-name').textContent = studentProfile.name;
+    document.getElementById('profile-email').textContent = studentProfile.email + (studentProfile.role === 'unei' ? ' ・ 運営' : '');
+    setStatus('プロフィールを更新しました。');
+  });
+  document.getElementById('pe-close').addEventListener('click', closeModal);
+  overlayEl.classList.add('open');
+}
+
+document.getElementById('profile-edit').addEventListener('click', openProfileEdit);
+
+document.getElementById('logout-btn').addEventListener('click', () => {
+  // ログイン状態を解除（この端末のプロフィールを削除）
+  studentProfile = null;
+  try{ localStorage.removeItem(PROFILE_KEY); }catch(e){}
+  // 入力欄・状態をリセット
+  bookingMode = null;
+  selectedCandidates = [];
+  document.getElementById('gate-name').value = '';
+  document.getElementById('gate-email').value = '';
+  const pc = document.getElementById('gate-passcode');
+  if(pc) pc.value = '';
+  // 役割を「生徒」に戻す
+  document.getElementById('role-student').click();
+  setGateError('');
+  setStatus('');
+  // ログイン画面へ
   showGate();
 });
 
@@ -1663,7 +1805,7 @@ googleOverlayEl.addEventListener('click', (e) => { if(e.target === googleOverlay
     setStatus('⚠️ データの読み込みに失敗しました。通信環境を確認して、ページを再読み込みしてください。');
   }
   // プロフィールは端末ローカル、その他はキャッシュから読む（ここでは通信は発生しない）
-  await Promise.all([loadProfile(), loadRequests(), loadAvailability(), loadNgDates(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
+  await Promise.all([loadProfile(), loadRequests(), loadOpenSlots(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
   setStatus('');
   setupTokenClient();
   if(studentProfile){ showMain(); renderAll(); } else { showGate(); }
