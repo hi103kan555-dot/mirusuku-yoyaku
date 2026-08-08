@@ -916,14 +916,9 @@ async function sendNotification(req, eventType, extra){
   const isChanged = eventType === 'changed';
   const label = isApplied ? '予約が申請されました' : (isChanged ? '予約日時が変更されました' : '予約が確定しました');
 
-  // 宛先が1つも設定されていないときは送信を試みない
-  const hasRecipient = !!(notifySettings.adminEmail
-    || Object.values(notifySettings.instructorEmails || {}).some(v => v)
-    || Object.values(notifySettings.staffEmails || {}).some(v => v));
-  if(!hasRecipient){
-    setStatus(`${label}が、通知設定が未完了のためメールは送信されていません。`);
-    return;
-  }
+  // 宛先の判断はGAS側が行う。
+  // (アドレス一覧は管理者パスコードがある人にしか届かないため、
+  //  ここで「宛先があるか」を判定すると、見えない人からは送られなくなってしまう)
 
   const ins = instructorOf(req.instructorId);
   let dateTimeText;
@@ -984,7 +979,7 @@ async function sendNotification(req, eventType, extra){
     if(data.sent > 0){
       setStatus(`通知メールを${data.sent}件送信しました。(本日の残り送信可能数: ${data.remaining})`);
     }else{
-      setStatus('通知メールの宛先が見つかりませんでした。通知設定をご確認ください。', 'error');
+      setStatus('通知メールの宛先が設定されていないため、送信されませんでした。', 'error');
     }
   }catch(e){
     console.error('通知メールの送信に失敗:', e);
