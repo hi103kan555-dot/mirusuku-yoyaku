@@ -465,7 +465,8 @@ let monthInstructorFilter = 'all';
 let monthFilterPopulated = false;
 let requests = [];
 let openSlots = {};
-let notifySettings = { endpoint:'' };
+// メール通知の宛先設定。adminEmailは全通知が届く代表アドレス。
+let notifySettings = { adminEmail:'', instructorEmails:{}, staffEmails:{}, notifyStudent:true };
 let googleSettings = { clientId:'', calendarIds:{} };
 let studentProfile = null;
 let studentRegistry = {};
@@ -529,11 +530,16 @@ function buildHourRange(start, endExclusive){
   return arr;
 }
 
-function formspreeUrl(value){
-  const v = (value || '').trim();
-  if(!v) return '';
-  if(v.startsWith('http')) return v;
-  return `https://formspree.io/f/${v}`;
+// GASにメール送信を依頼する。宛先はGAS側が通知設定を見て決めるため、ここでは渡さない。
+async function gasNotify(payload){
+  const res = await fetch(GAS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action: 'notify', token: SHARED_TOKEN }, payload))
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'notify failed');
+  return data;
 }
 
 async function loadRequests(){
@@ -614,8 +620,14 @@ async function saveOpenSlots(){
     });
     if(Object.keys(encoded).length) payload[resourceId] = encoded;
   });
-  try{ await gasSaveKey('openSlots', payload); }
-  catch(e){ setStatus('対応可能枠の保存に失敗しました。'); }
+  try{
+    await gasSaveKey('openSlots', payload);
+    return true;
+  }catch(e){
+    // 保存できていないのに成功したように見せないため、失敗をそのまま呼び出し元へ返す
+    console.error('openSlotsの保存に失敗:', e);
+    return false;
+  }
 }
 // その日・その時刻の枠が「予約可能としてONにされているか」
 function isOpenSlot(resourceId, dateStr, hour){
@@ -634,7 +646,15 @@ function shiftDateStr(dateStr, days){
 async function loadNotifySettings(){
   try{
     const data = await gasGetAll();
-    if(data.notifySettings && typeof data.notifySettings === 'object') notifySettings = data.notifySettings;
+    const n = data.notifySettings;
+    if(n && typeof n === 'object'){
+      notifySettings = {
+        adminEmail: n.adminEmail || '',
+        instructorEmails: n.instructorEmails || {},
+        staffEmails: n.staffEmails || {},
+        notifyStudent: n.notifyStudent !== false
+      };
+    }
   }catch(e){}
 }
 async function saveNotifySettings(){
@@ -689,51 +709,83 @@ async function upsertStudentRegistry(email, data){
 }
 
 async function sendNotification(req, eventType, extra){
-  const url = formspreeUrl(notifySettings.endpoint);
   const isApplied = eventType === 'applied';
   const isChanged = eventType === 'changed';
-  if(!url){
-    const label = isApplied ? '予約が申請されました' : (isChanged ? '予約日時が変更されました' : '予約が確定しました');
+  const label = isApplied ? '予約が申請されました' : (isChanged ? '予約日時が変更されました' : '予約が確定しました');
+
+  // 宛先が1つも設定されていないときは送信を試みない
+  const hasRecipient = !!(notifySettings.adminEmail
+    || Object.values(notifySettings.instructorEmails || {}).some(v => v)
+    || Object.values(notifySettings.staffEmails || {}).some(v => v));
+  if(!hasRecipient){
     setStatus(`${label}が、通知設定が未完了のためメールは送信されていません。`);
     return;
   }
+
   const ins = instructorOf(req.instructorId);
   let dateTimeText;
   if(isApplied){
     dateTimeText = (req.candidates || []).map((c, i) => {
       const d = new Date(c.date + 'T00:00:00');
       return `${CANDIDATE_LABEL[i] || ''}: ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(c.hour)}〜${formatHour(c.hour+1)}`;
-    }).join(' / ');
+    }).join('\n  ');
   }else{
     const d = new Date(req.date + 'T00:00:00');
     dateTimeText = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(req.hour)}〜${formatHour(req.hour+1)}`;
   }
-  let previousDateTimeText = '';
+  let previousLine = '';
   if(isChanged && extra && extra.oldDate != null && extra.oldHour != null){
     const od = new Date(extra.oldDate + 'T00:00:00');
-    previousDateTimeText = `${od.getMonth()+1}/${od.getDate()}(${weekdayJp(od)}) ${formatHour(extra.oldHour)}〜${formatHour(extra.oldHour+1)}`;
+    previousLine = `変更前の日時: ${od.getMonth()+1}/${od.getDate()}(${weekdayJp(od)}) ${formatHour(extra.oldHour)}〜${formatHour(extra.oldHour+1)}\n`;
   }
-  const payload = {
-    subject: isApplied ? 'ミルスク 予約の申請を受け付けました' : (isChanged ? 'ミルスク 予約日時が変更されました' : 'ミルスク 予約が確定しました'),
-    status_label: isApplied ? '申請中' : (isChanged ? '変更確定' : '確定'),
-    instructor: ins ? ins.name : req.instructorId,
-    assigned_staff: req.assignedStaff || '',
-    course: req.course || '未選択',
-    applicant_name: req.name,
-    email: req.email || '',
-    datetime: dateTimeText,
-    previous_datetime: previousDateTimeText,
-    memo: req.memo || 'なし',
-  };
+
+  // 運営・講師あての本文
+  const staffText =
+    `${label}。\n\n` +
+    `講師: ${ins ? ins.name : req.instructorId}\n` +
+    (req.assignedStaff ? `担当者: ${req.assignedStaff}\n` : '') +
+    `コース: ${req.course || '未選択'}\n` +
+    `生徒名: ${req.name}\n` +
+    `メール: ${req.email || '未登録'}\n` +
+    `${isApplied ? '希望日時' : '日時'}: ${isApplied ? '\n  ' : ''}${dateTimeText}\n` +
+    previousLine +
+    `メモ: ${req.memo || 'なし'}\n`;
+
+  // 生徒あての本文
+  const studentText =
+    `${req.name} さん\n\n` +
+    (isApplied
+      ? 'ご予約の申請を受け付けました。確定しましたら、あらためてご連絡いたします。\n'
+      : (isChanged ? 'ご予約の日時が変更されました。\n' : 'ご予約が確定しました。\n')) +
+    `\n講師: ${ins ? ins.name : req.instructorId}\n` +
+    (req.assignedStaff ? `担当者: ${req.assignedStaff}\n` : '') +
+    `コース: ${req.course || '未選択'}\n` +
+    `${isApplied ? '希望日時' : '日時'}: ${isApplied ? '\n  ' : ''}${dateTimeText}\n` +
+    previousLine +
+    `\nミルスク`;
+
+  // 運営スタッフのIDを名前から逆引きする（担当者本人にも届けるため）
+  const staff = UNEI_STAFF.find(s => s.name === req.assignedStaff);
+
   try{
-    const res = await fetch(url, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json', 'Accept':'application/json' },
-      body: JSON.stringify(payload),
+    const data = await gasNotify({
+      instructorId: req.instructorId,
+      staffId: staff ? staff.id : '',
+      studentEmail: req.email || '',
+      subject: `ミルスク ${label}`,
+      text: staffText,
+      studentSubject: isApplied ? 'ミルスク 予約の申請を受け付けました'
+        : (isChanged ? 'ミルスク 予約日時が変更されました' : 'ミルスク 予約が確定しました'),
+      studentText: studentText
     });
-    setStatus(res.ok ? (isApplied ? '申請通知メールを送信しました。' : (isChanged ? '変更確定メールを送信しました。' : '確定通知メールを送信しました。')) : '通知メールの送信に失敗しました。Formspreeの設定をご確認ください。');
+    if(data.sent > 0){
+      setStatus(`通知メールを${data.sent}件送信しました。(本日の残り送信可能数: ${data.remaining})`);
+    }else{
+      setStatus('通知メールの宛先が見つかりませんでした。通知設定をご確認ください。');
+    }
   }catch(e){
-    setStatus('通知メールの送信に失敗しました。Formspreeの設定をご確認ください。');
+    console.error('通知メールの送信に失敗:', e);
+    setStatus('通知メールの送信に失敗しました。通知設定をご確認ください。');
   }
 }
 
@@ -1328,19 +1380,60 @@ function openRescheduleModal(reqId){
 }
 
 function openSettings(){
+  const ie = notifySettings.instructorEmails || {};
+  const se = notifySettings.staffEmails || {};
+  const rows = INSTRUCTORS.map(ins =>
+    `<label>${escapeHtml(ins.name)}</label>
+     <input type="email" class="s-ins" data-id="${ins.id}" value="${escapeHtml(ie[ins.id] || '')}" placeholder="未設定なら送りません">`
+  ).join('');
+  const staffRows = UNEI_STAFF.map(st =>
+    `<label>${escapeHtml(st.name)}（運営スタッフ）</label>
+     <input type="email" class="s-staff" data-id="${st.id}" value="${escapeHtml(se[st.id] || '')}" placeholder="未設定なら送りません">`
+  ).join('');
+
   settingsContentEl.innerHTML = `
     <h2>予約通知メールの設定</h2>
-    <p class="sub">予約が申請・確定されたときに、Formspree経由でメールを送ります。</p>
-    <label>Formspree フォームURL / Form ID</label>
-    <input type="text" id="s-endpoint" value="${escapeHtml(notifySettings.endpoint)}" placeholder="https://formspree.io/f/xxxxxxxx または xxxxxxxx">
-    <p class="help">送信される内容: 講師名(instructor)・担当者(assigned_staff)・コース(course)・生徒名(applicant_name)・メール(email)・日時(datetime)・変更前の日時(previous_datetime、日時変更の時のみ)・メモ(memo)。Formspreeの「Plugins → Auto Response」を有効にすると、この email 宛にも自動で確認メールが届きます(プランによっては有料機能です)。</p>
+    <p class="sub">予約が申請・確定・変更されたときに、Gmail経由でメールを送ります。届く内容は、講師名・担当者・コース・生徒名・メール・日時・メモです。</p>
+
+    <label>運営の代表アドレス</label>
+    <input type="email" id="s-admin" value="${escapeHtml(notifySettings.adminEmail || '')}" placeholder="すべての予約通知がここに届きます">
+
+    <p class="help" style="margin-bottom:4px;">講師ごとの宛先（自分が担当する予約だけが届きます）</p>
+    ${rows}
+
+    <p class="help" style="margin-bottom:4px;">運営メニューの担当者ごとの宛先（担当に割り当てられた予約だけが届きます）</p>
+    ${staffRows}
+
+    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="s-student" style="width:auto; margin:0;">
+      生徒にも確認メールを送る
+    </label>
+    <p class="help">生徒名簿に登録済みのアドレスにのみ送信します。メールの差出人は、このGASを作成したGoogleアカウントになります。1日の送信上限は通常のGmailで100通、Google Workspaceで1,500通です。</p>
+
     <div class="modal-actions">
       <button class="btn btn-primary" id="s-save">保存する</button>
       <button class="btn btn-ghost" id="s-close">閉じる</button>
     </div>
   `;
+  document.getElementById('s-student').checked = notifySettings.notifyStudent !== false;
+
   document.getElementById('s-save').addEventListener('click', async () => {
-    notifySettings = { endpoint: document.getElementById('s-endpoint').value.trim() };
+    const instructorEmails = {};
+    settingsContentEl.querySelectorAll('.s-ins').forEach(el => {
+      const v = el.value.trim();
+      if(v) instructorEmails[el.dataset.id] = v;
+    });
+    const staffEmails = {};
+    settingsContentEl.querySelectorAll('.s-staff').forEach(el => {
+      const v = el.value.trim();
+      if(v) staffEmails[el.dataset.id] = v;
+    });
+    notifySettings = {
+      adminEmail: document.getElementById('s-admin').value.trim(),
+      instructorEmails,
+      staffEmails,
+      notifyStudent: document.getElementById('s-student').checked
+    };
     await saveNotifySettings();
     setStatus('通知設定を保存しました。');
     closeSettings();
@@ -1499,7 +1592,17 @@ function openResourceAvailability(resourceId, displayName){
         if(arr.length) map[dstr] = arr;
       });
       openSlots[resourceId] = map;
-      await saveOpenSlots();
+      const saveBtn = document.getElementById('a-save');
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中…';
+      const ok = await saveOpenSlots();
+      if(!ok){
+        // 失敗時はモーダルを閉じない(入力内容を失わせないため)
+        saveBtn.disabled = false;
+        saveBtn.textContent = '保存する';
+        alert('保存できませんでした。\n\nスプレッドシートへの書き込みが拒否されています。GAS側で openSlots というキーの保存が許可されているかご確認ください。\n\nこの画面はまだ閉じないでください(閉じると入力内容が消えます)。');
+        return;
+      }
       setStatus('対応可能枠を保存しました。');
       closeAvailability();
       renderSchedule();
