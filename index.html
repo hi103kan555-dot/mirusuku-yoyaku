@@ -112,7 +112,30 @@
   }
   .candidate-bar .spacer{ flex:1; }
 
-  .status-msg{ text-align:center; font-size:12.5px; color:var(--cream); margin-top:6px; font-weight:600; }
+  /* 画面下に浮かぶお知らせ(トースト)。数秒で自動的に消える。 */
+  .status-msg{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(12px);
+    max-width:min(92vw, 520px); padding:12px 18px; border-radius:14px;
+    background:var(--brown); color:var(--cream);
+    font-size:13px; font-weight:700; text-align:center; line-height:1.6;
+    box-shadow:0 8px 24px rgba(107,66,38,0.28);
+    opacity:0; pointer-events:none; white-space:pre-wrap;
+    transition:opacity .25s ease, transform .25s ease; z-index:60;
+  }
+  .status-msg.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+  .status-msg.error{ background:#B4453A; }
+
+  /* 起動時のローディング画面 */
+  .boot-loading{ position:fixed; inset:0; background:var(--cream); display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px; z-index:80; transition:opacity .3s ease; }
+  .boot-loading.hide{ opacity:0; pointer-events:none; }
+  .boot-spinner{ width:34px; height:34px; border:4px solid rgba(107,66,38,0.18);
+    border-top-color:var(--brown); border-radius:50%; animation:boot-spin .8s linear infinite; }
+  @keyframes boot-spin{ to{ transform:rotate(360deg); } }
+  .boot-text{ font-size:13px; font-weight:700; color:var(--brown-soft); }
+  /* 確認ダイアログは他のモーダルより手前に出す */
+  .modal-overlay.confirm-overlay{ z-index:40; }
+  .modal.confirm-modal{ max-width:360px; }
 
   .list-empty{ font-size:13px; color:var(--brown-soft); text-align:center; padding:20px 0; }
   .list-row{ display:flex; align-items:center; gap:10px; padding:10px 8px; border-bottom:1px solid var(--line); font-size:13px; flex-wrap:wrap; }
@@ -190,9 +213,6 @@
   .month-cell .daynum{ font-weight:700; color:var(--brown); margin-bottom:4px; }
   .month-event{ font-size:10px; font-weight:700; border-radius:6px; padding:2px 5px; margin-bottom:3px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
-  .res-item{ display:flex; justify-content:space-between; align-items:center; background:#10192280; border:1px solid var(--line); border-radius:4px; padding:6px 10px; font-size:13px; margin-bottom:6px; }
-  .res-item button{ background:none; border:none; color:var(--brown-soft); font-size:14px; cursor:pointer; }
-  .res-item button:hover{ color:#B24C33; }
   .res-add{ display:flex; gap:8px; }
 
   /* もっとポップでかわいく: バウンス感・虹色アクセント・丸いスウォッチ */
@@ -382,6 +402,11 @@
 <div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-content"></div></div>
 <div class="modal-overlay" id="settings-overlay"><div class="modal" id="settings-content"></div></div>
 <div class="modal-overlay" id="availability-overlay"><div class="modal" id="availability-content"></div></div>
+<div class="modal-overlay confirm-overlay" id="confirm-overlay"><div class="modal confirm-modal" id="confirm-content"></div></div>
+<div class="boot-loading" id="boot-loading">
+  <div class="boot-spinner"></div>
+  <div class="boot-text" id="boot-text">予約データを読み込んでいます…</div>
+</div>
 <div class="modal-overlay" id="google-overlay"><div class="modal" id="google-content"></div></div>
 
 <script>
@@ -413,7 +438,10 @@ const NOTIFY_SETTINGS_KEY = 'mirusuku-notify-settings';
 const GOOGLE_SETTINGS_KEY = 'mirusuku-google-settings';
 const PROFILE_KEY = 'mirusuku-student-profile';
 const STUDENT_REGISTRY_KEY = 'mirusuku-student-registry';
-const OPERATOR_PASSCODE = 'mirusuku';
+/* パスコードはHTMLに書かない（誰でも読めてしまうため）。
+   照合はGAS側で行い、ここでは入力された文字列を預かって毎回の通信に添えるだけにする。 */
+let operatorPass = '';  // 運営パスコード。ログイン状態と一緒にこの端末に保存する
+let adminPass = '';     // 管理者パスコード。保存せず、開いている間だけ覚える
 
 /* ===== GAS(スプレッドシート)接続設定 =====
    保存先を Google Apps Script のWebアプリURLに切り替える。
@@ -429,7 +457,12 @@ let _gasCache = null;
 // GASから全データを取得（初回のみ通信し、以後はキャッシュを使う）
 async function gasGetAll(force){
   if(_gasCache && !force) return _gasCache;
-  const url = GAS_URL + '?action=getAll&token=' + encodeURIComponent(SHARED_TOKEN);
+  const params = new URLSearchParams({ action:'getAll', token: SHARED_TOKEN });
+  // 権限に応じて、GASが返す情報の範囲が変わる
+  if(operatorPass) params.set('pass', operatorPass);
+  if(adminPass) params.set('adminPass', adminPass);
+  if(studentProfile && studentProfile.email) params.set('viewer', studentProfile.email);
+  const url = GAS_URL + '?' + params.toString();
   const res = await fetch(url);
   const data = await res.json();
   if(!data.ok) throw new Error(data.error || 'getAll failed');
@@ -446,6 +479,8 @@ async function gasSaveKey(key, valueObj){
     body: JSON.stringify({
       action: 'saveKey',
       token: SHARED_TOKEN,
+      pass: operatorPass,
+      adminPass: adminPass,
       key: key,
       value: JSON.stringify(valueObj)
     })
@@ -496,7 +531,55 @@ const reportMonthEl = document.getElementById('report-month');
 const reportBodyEl = document.getElementById('report-body');
 const candidateBarEl = document.getElementById('candidate-bar');
 
-function setStatus(msg){ statusEl.textContent = msg || ''; }
+let _statusTimer = null;
+// msg を画面下に数秒表示する。type に 'error' を渡すと赤系＋長めに表示。
+function setStatus(msg, type){
+  if(_statusTimer){ clearTimeout(_statusTimer); _statusTimer = null; }
+  if(!msg){ statusEl.className = 'status-msg'; statusEl.textContent = ''; return; }
+  statusEl.textContent = msg;
+  statusEl.className = 'status-msg show' + (type === 'error' ? ' error' : '');
+  _statusTimer = setTimeout(() => { statusEl.classList.remove('show'); }, type === 'error' ? 8000 : 4500);
+}
+
+const confirmOverlayEl = document.getElementById('confirm-overlay');
+const confirmContentEl = document.getElementById('confirm-content');
+// はい/いいえの確認ダイアログ。await askConfirm({...}) で true/false が返る。
+function askConfirm({ title, message, okLabel = 'はい', cancelLabel = 'やめる', danger = false }){
+  return new Promise(resolve => {
+    confirmContentEl.innerHTML = `
+      <h2>${escapeHtml(title)}</h2>
+      <p class="sub" style="white-space:pre-wrap; margin-bottom:18px;">${escapeHtml(message || '')}</p>
+      <div class="modal-actions">
+        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" id="cf-ok">${escapeHtml(okLabel)}</button>
+        <button class="btn btn-ghost" id="cf-cancel">${escapeHtml(cancelLabel)}</button>
+      </div>
+    `;
+    confirmOverlayEl.classList.add('open');
+    const close = (result) => {
+      confirmOverlayEl.classList.remove('open');
+      confirmContentEl.innerHTML = '';
+      resolve(result);
+    };
+    document.getElementById('cf-ok').addEventListener('click', () => close(true));
+    document.getElementById('cf-cancel').addEventListener('click', () => close(false));
+  });
+}
+// 予約1件を「8/8(土) 10:00 aloma さん」のような一行にする
+function requestSummaryText(req){
+  const parts = [];
+  const ins = instructorOf(req.instructorId);
+  if(req.date != null && req.hour != null){
+    const d = new Date(req.date + 'T00:00:00');
+    parts.push(`${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(req.hour)}〜${formatHour(req.hour+1)}`);
+  }else if((req.candidates || []).length){
+    const c = req.candidates[0];
+    const d = new Date(c.date + 'T00:00:00');
+    parts.push(`第1希望 ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(c.hour)}`);
+  }
+  parts.push(`${ins ? ins.name : req.instructorId}${req.assignedStaff ? '／' + req.assignedStaff : ''}`);
+  parts.push(req.name ? `${req.name} さん` : 'あなたの予約');
+  return parts.join('\n');
+}
 function escapeHtml(str){ const d = document.createElement('div'); d.textContent = str == null ? '' : String(str); return d.innerHTML; }
 function instructorOf(id){ return INSTRUCTORS.find(i => i.id === id); }
 function isoWeekday(d){ const wd = d.getDay(); return wd === 0 ? 7 : wd; }
@@ -530,6 +613,50 @@ function buildHourRange(start, endExclusive){
   return arr;
 }
 
+// 運営パスコードが正しいかGASに問い合わせる（照合はGAS側で行う）
+async function gasVerifyOperator(passcode){
+  const res = await fetch(GAS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action:'login', token: SHARED_TOKEN, pass: passcode })
+  });
+  const data = await res.json();
+  return !!data.valid;
+}
+
+// 権限が変わったあとに、見られる範囲のデータを取り直す
+async function reloadAllData(){
+  try{ await gasGetAll(true); }catch(e){ return false; }
+  await Promise.all([loadRequests(), loadOpenSlots(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
+  return true;
+}
+
+// パスコードを尋ねるダイアログ。入力された文字列（キャンセル時はnull）を返す。
+function askPasscode({ title, message, placeholder = 'パスコード' }){
+  return new Promise(resolve => {
+    confirmContentEl.innerHTML = `
+      <h2>${escapeHtml(title)}</h2>
+      <p class="sub" style="white-space:pre-wrap;">${escapeHtml(message || '')}</p>
+      <input type="password" id="pc-input" placeholder="${escapeHtml(placeholder)}" autocomplete="off">
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="pc-ok">確認</button>
+        <button class="btn btn-ghost" id="pc-cancel">やめる</button>
+      </div>
+    `;
+    confirmOverlayEl.classList.add('open');
+    const close = (value) => {
+      confirmOverlayEl.classList.remove('open');
+      confirmContentEl.innerHTML = '';
+      resolve(value);
+    };
+    const input = document.getElementById('pc-input');
+    input.focus();
+    input.addEventListener('keydown', (e) => { if(e.key === 'Enter') close(input.value); });
+    document.getElementById('pc-ok').addEventListener('click', () => close(input.value));
+    document.getElementById('pc-cancel').addEventListener('click', () => close(null));
+  });
+}
+
 // GASにメール送信を依頼する。宛先はGAS側が通知設定を見て決めるため、ここでは渡さない。
 async function gasNotify(payload){
   const res = await fetch(GAS_URL, {
@@ -556,7 +683,48 @@ async function loadRequests(){
 async function saveRequests(){
   try{
     await gasSaveKey('requests', requests);
-  }catch(e){ setStatus('保存に失敗しました。もう一度お試しください。'); }
+  }catch(e){ setStatus('保存に失敗しました。もう一度お試しください。', 'error'); }
+}
+
+/* 予約を書き換えるときは必ずこれを通す。
+   ページを開いたまま放置していると手元のデータが古くなるため、保存の直前に
+   最新の予約リストを取り直し、そこへ自分の変更だけを適用してから書き戻す。
+   （そうしないと、その間に他の人が入れた予約を上書きで消してしまう）
+   applyFn は最新のリストを受け取り、書き戻すリストを返す。
+   途中で「もう無理」と判断したら null を返すと保存を中止できる。 */
+async function commitRequests(applyFn){
+  let next;
+  try{
+    const data = await gasGetAll(true);
+    const latest = Array.isArray(data.requests) ? data.requests : [];
+    next = applyFn(latest);
+  }catch(e){
+    console.error('最新の予約状況の取得に失敗:', e);
+    setStatus('最新の予約状況を取得できませんでした。通信環境を確認して、もう一度お試しください。', 'error');
+    return false;
+  }
+  if(next === null) return false;
+  requests = next;
+  try{
+    await gasSaveKey('requests', requests);
+    return true;
+  }catch(e){
+    setStatus('保存に失敗しました。もう一度お試しください。', 'error');
+    return false;
+  }
+}
+
+/* ボタンの二重押し防止。押している間は無効化してラベルを差し替える。 */
+async function withBusy(btn, busyLabel, fn){
+  if(!btn || btn.disabled) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = busyLabel;
+  try{
+    return await fn();
+  }finally{
+    if(btn.isConnected){ btn.disabled = false; btn.textContent = original; }
+  }
 }
 
 /* ===== 対応可能枠(日付ベースの足し算方式) =====
@@ -610,6 +778,26 @@ async function loadOpenSlots(){
   }catch(e){ openSlots = {}; }
 }
 async function saveOpenSlots(){
+  // 他の講師が同時に設定していた場合に、その分を消してしまわないよう最新を取り直して合流する
+  try{
+    const data = await gasGetAll(true);
+    const raw = (data.openSlots && typeof data.openSlots === 'object') ? data.openSlots : {};
+    Object.keys(raw).forEach(resourceId => {
+      if(openSlots[resourceId] !== undefined) return; // 自分がいま編集した分はそのまま使う
+      const days = raw[resourceId];
+      if(!days || typeof days !== 'object') return;
+      const map = {};
+      Object.keys(days).forEach(dstr => {
+        const hours = decodeDayHours(days[dstr]);
+        if(hours.length) map[dstr] = hours;
+      });
+      openSlots[resourceId] = map;
+    });
+  }catch(e){
+    console.error('最新の対応可能枠の取得に失敗:', e);
+    return false;
+  }
+
   const payload = {};
   Object.keys(openSlots).forEach(resourceId => {
     const days = openSlots[resourceId] || {};
@@ -658,8 +846,13 @@ async function loadNotifySettings(){
   }catch(e){}
 }
 async function saveNotifySettings(){
-  try{ await gasSaveKey('notifySettings', notifySettings); }
-  catch(e){ setStatus('通知設定の保存に失敗しました。'); }
+  try{
+    await gasSaveKey('notifySettings', notifySettings);
+    return true;
+  }catch(e){
+    setStatus('通知設定を保存できませんでした。管理者パスコードをご確認ください。', 'error');
+    return false;
+  }
 }
 
 async function loadGoogleSettings(){
@@ -677,7 +870,7 @@ async function loadGoogleSettings(){
 }
 async function saveGoogleSettings(){
   try{ await gasSaveKey('googleSettings', googleSettings); }
-  catch(e){ setStatus('Googleカレンダー設定の保存に失敗しました。'); }
+  catch(e){ setStatus('Googleカレンダー設定の保存に失敗しました。', 'error'); }
   setupTokenClient();
 }
 
@@ -687,12 +880,14 @@ async function loadProfile(){
   try{
     const raw = localStorage.getItem(PROFILE_KEY);
     studentProfile = raw ? JSON.parse(raw) : null;
-  }catch(e){ studentProfile = null; }
+    // ログイン状態と一緒に預かっている運営パスコードを復元する
+    operatorPass = (studentProfile && studentProfile.pass) ? studentProfile.pass : '';
+  }catch(e){ studentProfile = null; operatorPass = ''; }
 }
 async function saveProfile(profile){
   studentProfile = profile;
   try{ localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }
-  catch(e){ setStatus('プロフィールの保存に失敗しました。'); }
+  catch(e){ setStatus('プロフィールの保存に失敗しました。', 'error'); }
 }
 
 async function loadStudentRegistry(){
@@ -704,8 +899,16 @@ async function loadStudentRegistry(){
 async function upsertStudentRegistry(email, data){
   if(!email) return;
   studentRegistry[email] = { ...(studentRegistry[email] || {}), ...data, updatedAt: new Date().toISOString() };
-  try{ await gasSaveKey('studentRegistry', studentRegistry); }
-  catch(e){ /* レジストリの保存に失敗しても致命的ではないため静かに無視 */ }
+  // 名簿全体を送りつけると、名簿を見られない生徒の画面から他の人の登録を消してしまう。
+  // そのため1件分だけ送り、合流はGAS側で行う。
+  try{
+    const res = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action:'registerStudent', token: SHARED_TOKEN, email, data })
+    });
+    await res.json();
+  }catch(e){ /* 名簿の保存に失敗しても致命的ではないため静かに無視 */ }
 }
 
 async function sendNotification(req, eventType, extra){
@@ -781,11 +984,11 @@ async function sendNotification(req, eventType, extra){
     if(data.sent > 0){
       setStatus(`通知メールを${data.sent}件送信しました。(本日の残り送信可能数: ${data.remaining})`);
     }else{
-      setStatus('通知メールの宛先が見つかりませんでした。通知設定をご確認ください。');
+      setStatus('通知メールの宛先が見つかりませんでした。通知設定をご確認ください。', 'error');
     }
   }catch(e){
     console.error('通知メールの送信に失敗:', e);
-    setStatus('通知メールの送信に失敗しました。通知設定をご確認ください。');
+    setStatus('通知メールの送信に失敗しました。通知設定をご確認ください。', 'error');
   }
 }
 
@@ -829,7 +1032,7 @@ async function createCalendarEvent(req){
     });
     setStatus(res.ok ? 'Googleカレンダーに予定を追加しました。' : 'Googleカレンダーへの登録に失敗しました。連携をやり直してください。');
   }catch(e){
-    setStatus('Googleカレンダーへの登録に失敗しました。連携をやり直してください。');
+    setStatus('Googleカレンダーへの登録に失敗しました。連携をやり直してください。', 'error');
   }
 }
 
@@ -1044,7 +1247,8 @@ function renderList(){
 
   let base = requests;
   if(!isUnei){
-    base = base.filter(r => studentProfile && r.email === studentProfile.email);
+    // 氏名やメールは返ってこないため、GASが付けた「自分のもの」の印で絞り込む
+    base = base.filter(r => r.mine);
   }else if(listInstructorFilter !== 'all'){
     base = base.filter(r => r.instructorId === listInstructorFilter);
   }
@@ -1082,7 +1286,7 @@ function renderList(){
         <span class="ins-dot" style="background:${ins ? ins.color : '#ccc'}"></span>
         <div class="list-main">
           <div><b>${ins ? escapeHtml(ins.name) : ''}</b>${r.assignedStaff ? ' ・ ' + escapeHtml(r.assignedStaff) : ''} ${escapeHtml(dateTimeLabel)} ・ ${escapeHtml(r.course || '未選択')}</div>
-          <div class="meta">${escapeHtml(r.name)}${r.memo ? ' ・ ' + escapeHtml(r.memo) : ''}</div>
+          ${(r.name || r.memo) ? `<div class="meta">${escapeHtml(r.name || '')}${r.memo ? (r.name ? ' ・ ' : '') + escapeHtml(r.memo) : ''}</div>` : ''}
         </div>
         <span class="badge ${badgeClass}">${statusLabel}</span>
         <div class="list-actions">
@@ -1226,24 +1430,27 @@ function openCandidateApplyModal(){
       submitBtn.style.opacity = e.target.checked ? '1' : '0.5';
     });
   }
-  document.getElementById('m-submit').addEventListener('click', async () => {
-    const name = document.getElementById('m-name').value.trim();
-    const email = document.getElementById('m-email').value.trim();
-    if(!name || !email){ setStatus('お名前とメールアドレスは必須です。'); return; }
-    const course = document.getElementById('m-course').value;
-    const memo = document.getElementById('m-memo').value.trim();
-    const newReq = {
-      id: 'req' + Date.now() + Math.random().toString(36).slice(2,6),
-      instructorId: activeInstructor, status:'pending',
-      candidates: selectedCandidates.map(c => ({ date:c.date, hour:c.hour })),
-      name, email, course, memo
-    };
-    requests.push(newReq);
-    await saveRequests();
-    selectedCandidates = [];
-    closeModal();
-    renderAll();
-    await sendNotification(newReq, 'applied');
+  document.getElementById('m-submit').addEventListener('click', async (ev) => {
+    await withBusy(ev.currentTarget, '送信中…', async () => {
+      const name = document.getElementById('m-name').value.trim();
+      const email = document.getElementById('m-email').value.trim();
+      if(!name || !email){ setStatus('お名前とメールアドレスは必須です。', 'error'); return; }
+      const course = document.getElementById('m-course').value;
+      const memo = document.getElementById('m-memo').value.trim();
+      const newReq = {
+        id: 'req' + Date.now() + Math.random().toString(36).slice(2,6),
+        instructorId: activeInstructor, status:'pending',
+        candidates: selectedCandidates.map(c => ({ date:c.date, hour:c.hour })),
+        name, email, course, memo
+      };
+      const ok = await commitRequests(latest => latest.concat([newReq]));
+      if(!ok) return;
+      selectedCandidates = [];
+      closeModal();
+      renderAll();
+      setStatus('予約を申請しました。');
+      await sendNotification(newReq, 'applied');
+    });
   });
   document.getElementById('m-close').addEventListener('click', closeModal);
   overlayEl.classList.add('open');
@@ -1254,9 +1461,11 @@ function openCellInfoModal(dstr, hour){
   const d = new Date(dstr + 'T00:00:00');
   const cellReqs = getCellRequests(activeInstructor, d, hour);
   const dateLabel = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(hour)}〜${formatHour(hour+1)}`;
-  const rowsHtml = cellReqs.map(r => `
-    <div class="info-row"><b>${escapeHtml(r.name)}</b> ・ ${escapeHtml(r.course || '未選択')} ・ ${r.status === 'confirmed' ? '確定' : '申請中'}</div>
-  `).join('') || '<div class="info-row">情報がありません。</div>';
+  // 運営以外には、他の方の氏名やコースはGAS側で伏せられて届く
+  const rowsHtml = cellReqs.map(r => r.name
+    ? `<div class="info-row"><b>${escapeHtml(r.name)}</b> ・ ${escapeHtml(r.course || '未選択')} ・ ${r.status === 'confirmed' ? '確定' : '申請中'}</div>`
+    : `<div class="info-row">他の方の予約が入っています ・ ${r.status === 'confirmed' ? '確定' : '申請中'}</div>`
+  ).join('') || '<div class="info-row">情報がありません。</div>';
   modalEl.innerHTML = `
     <h2>${escapeHtml(ins.name)}</h2>
     <p class="sub">${dateLabel}</p>
@@ -1284,41 +1493,123 @@ function openCandidateApprovalModal(reqId){
       </label>
     `;
   }).join('');
+  // 運営メニューの予約は、担当者を選んでから確定する
+  const needsStaff = req.instructorId === 'unei' && isUnei;
   modalEl.innerHTML = `
     <h2>${escapeHtml(ins ? ins.name : '')}</h2>
     <p class="sub">${escapeHtml(req.name)} ・ ${escapeHtml(req.course || '未選択')}</p>
     ${optionsHtml}
     ${req.memo ? `<div class="info-row"><b>メモ:</b> ${escapeHtml(req.memo)}</div>` : ''}
+    ${needsStaff ? `
+      <label style="margin-top:14px;">担当者</label>
+      <select id="c-staff"></select>
+      <p class="help" id="c-staff-help"></p>
+    ` : ''}
     <div class="modal-actions">
       ${isUnei ? `<button class="btn btn-confirm" id="c-approve">この候補で確定する</button>` : ''}
       <button class="btn btn-danger" id="c-cancel">申請を取り消す</button>
       <button class="btn btn-ghost" id="c-close">閉じる</button>
     </div>
   `;
+
+  // 選ばれている候補日時に合わせて、担当者の選択肢と空き状況を出し直す
+  function refreshStaffOptions(){
+    if(!needsStaff) return;
+    const checked = modalEl.querySelector('input[name="cand-choice"]:checked');
+    if(!checked) return;
+    const chosen = req.candidates[parseInt(checked.value, 10)];
+    const d = new Date(chosen.date + 'T00:00:00');
+    const dstr = chosen.date;
+    const selectEl = document.getElementById('c-staff');
+    const keep = selectEl.value;
+    const recommended = assignStaffForSlot(d, chosen.hour, req.id);
+
+    selectEl.innerHTML = UNEI_STAFF.map(st => {
+      const openOk = isResourceFreeForLesson('unei_' + st.id, dstr, chosen.hour);
+      const busy = requests.some(r => r.instructorId === 'unei' && r.status === 'confirmed'
+        && r.date === dstr && hoursOverlap(r.hour, chosen.hour) && r.id !== req.id && r.assignedStaff === st.name);
+      let note = '';
+      if(busy) note = '（この時間は別の予約が入っています）';
+      else if(!openOk) note = '（対応可能枠がOFFです）';
+      return `<option value="${escapeHtml(st.name)}">${escapeHtml(st.name)}${note}</option>`;
+    }).join('');
+
+    // 前に選んでいた人がいればそれを、いなければ自動判定のおすすめを初期選択にする
+    const names = UNEI_STAFF.map(st => st.name);
+    selectEl.value = names.includes(keep) ? keep : (recommended || names[0]);
+    document.getElementById('c-staff-help').textContent = recommended
+      ? `この日時に対応できるのは ${recommended} さんです。別の方を選ぶこともできます。`
+      : 'この日時に対応可能枠をONにしている人がいません。それでも担当者を指定できます。';
+  }
+  refreshStaffOptions();
+  modalEl.querySelectorAll('input[name="cand-choice"]').forEach(el => {
+    el.addEventListener('change', refreshStaffOptions);
+  });
+
   const approveBtn = document.getElementById('c-approve');
   if(approveBtn){
-    approveBtn.addEventListener('click', async () => {
-      const idx = parseInt(modalEl.querySelector('input[name="cand-choice"]:checked').value, 10);
-      const chosen = req.candidates[idx];
-      req.date = chosen.date;
-      req.hour = chosen.hour;
-      req.status = 'confirmed';
-      if(req.instructorId === 'unei'){
-        const d = new Date(chosen.date + 'T00:00:00');
-        req.assignedStaff = assignStaffForSlot(d, chosen.hour, req.id);
-      }
-      await saveRequests();
-      closeModal();
-      renderAll();
-      await sendNotification(req, 'confirmed');
-      await createCalendarEvent(req);
+    approveBtn.addEventListener('click', async (ev) => {
+      await withBusy(ev.currentTarget, '確定中…', async () => {
+        const idx = parseInt(modalEl.querySelector('input[name="cand-choice"]:checked').value, 10);
+        const chosen = req.candidates[idx];
+        let confirmed = null;
+        const ok = await commitRequests(latest => {
+          // 最新データで空き状況を判定するため、先に手元のリストを差し替える
+          requests = latest;
+          const target = latest.find(r => r.id === req.id);
+          if(!target){
+            setStatus('この申請は、ほかの画面ですでに取り消されています。', 'error');
+            return null;
+          }
+          const d = new Date(chosen.date + 'T00:00:00');
+          const conflicts = getCellRequests(target.instructorId, d, chosen.hour)
+            .filter(r => r.id !== target.id && r.status === 'confirmed');
+          if(target.instructorId !== 'unei' && conflicts.length > 0){
+            setStatus('その時間帯は、ほかの予約で埋まってしまいました。別の候補を選んでください。', 'error');
+            return null;
+          }
+          target.date = chosen.date;
+          target.hour = chosen.hour;
+          target.status = 'confirmed';
+          if(target.instructorId === 'unei'){
+            const picked = document.getElementById('c-staff');
+            target.assignedStaff = picked ? picked.value : assignStaffForSlot(d, chosen.hour, target.id);
+            // 選んだ担当者が、その間に別の予約で埋まっていないか最新データで確認する
+            const taken = latest.some(r => r.instructorId === 'unei' && r.status === 'confirmed'
+              && r.date === chosen.date && hoursOverlap(r.hour, chosen.hour)
+              && r.id !== target.id && r.assignedStaff === target.assignedStaff);
+            if(taken){
+              setStatus(`${target.assignedStaff} さんは、その時間に別の予約が入りました。担当者を選び直してください。`, 'error');
+              return null;
+            }
+          }
+          confirmed = target;
+          return latest;
+        });
+        if(!ok){ renderAll(); return; }
+        closeModal();
+        renderAll();
+        setStatus('予約を確定しました。');
+        await sendNotification(confirmed, 'confirmed');
+        await createCalendarEvent(confirmed);
+      });
     });
   }
-  document.getElementById('c-cancel').addEventListener('click', async () => {
-    requests = requests.filter(r => r.id !== req.id);
-    await saveRequests();
-    closeModal();
-    renderAll();
+  document.getElementById('c-cancel').addEventListener('click', async (ev) => {
+    const ok = await askConfirm({
+      title: 'この申請を取り消しますか？',
+      message: requestSummaryText(req) + '\n\n取り消すと元に戻せません。',
+      okLabel: '取り消す',
+      danger: true
+    });
+    if(!ok) return;
+    await withBusy(ev.currentTarget, '取り消し中…', async () => {
+      const done = await commitRequests(latest => latest.filter(r => r.id !== req.id));
+      if(!done) return;
+      closeModal();
+      renderAll();
+      setStatus('申請を取り消しました。');
+    });
   });
   document.getElementById('c-close').addEventListener('click', closeModal);
   overlayEl.classList.add('open');
@@ -1344,42 +1635,100 @@ function openRescheduleModal(reqId){
     <input type="date" id="r-date" value="${oldDate}">
     <label>新しい開始時刻</label>
     <select id="r-hour">${hourOptions}</select>
+    ${req.instructorId === 'unei' ? `
+      <label>担当者</label>
+      <select id="r-staff">${UNEI_STAFF.map(st => `<option value="${escapeHtml(st.name)}" ${st.name === req.assignedStaff ? 'selected' : ''}>${escapeHtml(st.name)}</option>`).join('')}</select>
+    ` : ''}
     <p class="help">急な予約変更用です。変更すると生徒宛に「変更確定メール」が送信されます。既存のGoogleカレンダーの予定は自動削除されないため、必要な場合は手動で調整してください。</p>
     <div class="modal-actions">
       <button class="btn btn-primary" id="r-save">この日時に変更する</button>
       <button class="btn btn-ghost" id="r-close">閉じる</button>
     </div>
   `;
-  document.getElementById('r-save').addEventListener('click', async () => {
+  document.getElementById('r-save').addEventListener('click', async (ev) => {
     const newDate = document.getElementById('r-date').value;
     const newHour = parseFloat(document.getElementById('r-hour').value);
-    if(!newDate){ setStatus('新しい日付を選択してください。'); return; }
+    if(!newDate){ setStatus('新しい日付を選択してください。', 'error'); return; }
     if(newDate === oldDate && newHour === oldHour){ setStatus('日時が変更されていません。'); return; }
 
     const newDateObj = new Date(newDate + 'T00:00:00');
     const conflicts = getCellRequests(req.instructorId, newDateObj, newHour)
       .filter(r => r.id !== req.id && r.status === 'confirmed');
     if(conflicts.length > 0){
-      setStatus('その時間帯はすでに別の予約で埋まっています。別の日時を選んでください。');
+      setStatus('その時間帯はすでに別の予約で埋まっています。別の日時を選んでください。', 'error');
       return;
     }
 
-    req.date = newDate;
-    req.hour = newHour;
-    if(req.instructorId === 'unei'){
-      req.assignedStaff = assignStaffForSlot(newDateObj, newHour, req.id);
-    }
-    await saveRequests();
-    closeModal();
-    renderAll();
-    await sendNotification(req, 'changed', { oldDate, oldHour });
-    await createCalendarEvent(req);
+    const nd = new Date(newDate + 'T00:00:00');
+    const od = new Date(oldDate + 'T00:00:00');
+    const okChange = await askConfirm({
+      title: '予約日時を変更しますか？',
+      message: `${req.name} さんの予約\n\n変更前: ${od.getMonth()+1}/${od.getDate()}(${weekdayJp(od)}) ${formatHour(oldHour)}\n変更後: ${nd.getMonth()+1}/${nd.getDate()}(${weekdayJp(nd)}) ${formatHour(newHour)}\n\n変更すると、生徒さんにも変更のお知らせメールが届きます。`,
+      okLabel: '変更する'
+    });
+    if(!okChange) return;
+
+    await withBusy(ev.currentTarget, '変更中…', async () => {
+      let changed = null;
+      const done = await commitRequests(latest => {
+        requests = latest;
+        const target = latest.find(r => r.id === req.id);
+        if(!target){
+          setStatus('この予約は、ほかの画面ですでに取り消されています。', 'error');
+          return null;
+        }
+        const nowConflicts = getCellRequests(target.instructorId, newDateObj, newHour)
+          .filter(r => r.id !== target.id && r.status === 'confirmed');
+        if(target.instructorId !== 'unei' && nowConflicts.length > 0){
+          setStatus('その時間帯は、ほかの予約で埋まってしまいました。別の日時を選んでください。', 'error');
+          return null;
+        }
+        target.date = newDate;
+        target.hour = newHour;
+        if(target.instructorId === 'unei'){
+          const picked = document.getElementById('r-staff');
+          target.assignedStaff = picked ? picked.value : assignStaffForSlot(newDateObj, newHour, target.id);
+          const taken = latest.some(r => r.instructorId === 'unei' && r.status === 'confirmed'
+            && r.date === newDate && hoursOverlap(r.hour, newHour)
+            && r.id !== target.id && r.assignedStaff === target.assignedStaff);
+          if(taken){
+            setStatus(`${target.assignedStaff} さんは、その時間に別の予約が入っています。担当者を選び直してください。`, 'error');
+            return null;
+          }
+        }
+        changed = target;
+        return latest;
+      });
+      if(!done){ renderAll(); return; }
+      closeModal();
+      renderAll();
+      setStatus('予約日時を変更しました。');
+      await sendNotification(changed, 'changed', { oldDate, oldHour });
+      await createCalendarEvent(changed);
+    });
   });
   document.getElementById('r-close').addEventListener('click', closeModal);
   overlayEl.classList.add('open');
 }
 
-function openSettings(){
+async function openSettings(){
+  // メールアドレス一覧は管理者パスコードがないとGASが返してくれない
+  if(!adminPass){
+    const input = await askPasscode({
+      title: '管理者パスコードを入力',
+      message: '通知先のメールアドレス一覧を開きます。運営3名のみが操作できます。',
+      placeholder: '管理者パスコード'
+    });
+    if(input === null) return;
+    adminPass = input;
+    const ok = await reloadAllData();
+    if(!ok || !_gasCache || !_gasCache.isAdmin){
+      adminPass = '';
+      await reloadAllData();
+      setStatus('管理者パスコードが違います。', 'error');
+      return;
+    }
+  }
   const ie = notifySettings.instructorEmails || {};
   const se = notifySettings.staffEmails || {};
   const rows = INSTRUCTORS.map(ins =>
@@ -1434,7 +1783,8 @@ function openSettings(){
       staffEmails,
       notifyStudent: document.getElementById('s-student').checked
     };
-    await saveNotifySettings();
+    const saved = await saveNotifySettings();
+    if(!saved) return;
     setStatus('通知設定を保存しました。');
     closeSettings();
   });
@@ -1667,7 +2017,7 @@ function openGoogle(){
     setStatus('Googleカレンダー設定を保存しました。');
   });
   document.getElementById('g-connect').addEventListener('click', () => {
-    if(!tokenClient){ setStatus('先にClient IDを保存してください。'); return; }
+    if(!tokenClient){ setStatus('先にClient IDを保存してください。', 'error'); return; }
     tokenClient.requestAccessToken();
   });
   document.getElementById('g-close').addEventListener('click', () => { googleOverlayEl.classList.remove('open'); googleContentEl.innerHTML = ''; });
@@ -1722,21 +2072,36 @@ function setGateError(msg){
   el.style.display = msg ? 'block' : 'none';
 }
 
-document.getElementById('gate-submit').addEventListener('click', async () => {
-  const name = document.getElementById('gate-name').value.trim();
-  const email = document.getElementById('gate-email').value.trim();
-  if(!name || !email){ setGateError('お名前とメールアドレスを入力してください。'); return; }
-  if(gateRole === 'unei'){
-    const passcode = document.getElementById('gate-passcode').value;
-    if(!passcode){ setGateError('運営パスコードを入力してください。'); return; }
-    if(passcode !== OPERATOR_PASSCODE){ setGateError('運営パスコードが違います。もう一度ご確認ください。'); return; }
-  }
-  setGateError('');
-  await saveProfile({ name, email, role: gateRole });
-  await upsertStudentRegistry(email, { name });
-  setStatus('');
-  showMain();
-  renderAll();
+document.getElementById('gate-submit').addEventListener('click', async (ev) => {
+  await withBusy(ev.currentTarget, '確認中…', async () => {
+    const name = document.getElementById('gate-name').value.trim();
+    const email = document.getElementById('gate-email').value.trim();
+    if(!name || !email){ setGateError('お名前とメールアドレスを入力してください。'); return; }
+    if(gateRole === 'unei'){
+      const passcode = document.getElementById('gate-passcode').value;
+      if(!passcode){ setGateError('運営パスコードを入力してください。'); return; }
+      // パスコードの正誤はGAS側で判定する
+      let valid = false;
+      try{
+        valid = await gasVerifyOperator(passcode);
+      }catch(e){
+        setGateError('通信に失敗しました。通信環境を確認して、もう一度お試しください。');
+        return;
+      }
+      if(!valid){ setGateError('運営パスコードが違います。もう一度ご確認ください。'); return; }
+      operatorPass = passcode;
+    }else{
+      operatorPass = '';
+    }
+    setGateError('');
+    await saveProfile({ name, email, role: gateRole, pass: operatorPass });
+    // 権限が変わったので、見られる範囲のデータを取り直す
+    await reloadAllData();
+    await upsertStudentRegistry(email, { name });
+    setStatus('');
+    showMain();
+    renderAll();
+  });
 });
 
 document.getElementById('gate-email').addEventListener('blur', () => {
@@ -1779,9 +2144,17 @@ function openProfileEdit(){
 
 document.getElementById('profile-edit').addEventListener('click', openProfileEdit);
 
-document.getElementById('logout-btn').addEventListener('click', () => {
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  const ok = await askConfirm({
+    title: 'ログアウトしますか？',
+    message: '次に使うときは、お名前とメールアドレスの入力が必要になります。予約の内容は消えません。',
+    okLabel: 'ログアウト'
+  });
+  if(!ok) return;
   // ログイン状態を解除（この端末のプロフィールを削除）
   studentProfile = null;
+  operatorPass = '';
+  adminPass = '';
   try{ localStorage.removeItem(PROFILE_KEY); }catch(e){}
   // 入力欄・状態をリセット
   bookingMode = null;
@@ -1880,9 +2253,19 @@ listEl.addEventListener('click', async (e) => {
     openRescheduleModal(id);
   }
   if(btn.dataset.action === 'list-cancel'){
-    requests = requests.filter(r => r.id !== id);
-    await saveRequests();
-    renderAll();
+    const ok = await askConfirm({
+      title: 'この予約を取り消しますか？',
+      message: requestSummaryText(req) + '\n\n取り消すと元に戻せません。Googleカレンダーの予定は自動では消えないため、必要なら手動で削除してください。',
+      okLabel: '取り消す',
+      danger: true
+    });
+    if(!ok) return;
+    await withBusy(btn, '取り消し中…', async () => {
+      const done = await commitRequests(latest => latest.filter(r => r.id !== id));
+      if(!done) return;
+      renderAll();
+      setStatus('予約を取り消しました。');
+    });
   }
 });
 
@@ -1900,18 +2283,24 @@ availabilityOverlayEl.addEventListener('click', (e) => { if(e.target === availab
 googleOverlayEl.addEventListener('click', (e) => { if(e.target === googleOverlayEl){ googleOverlayEl.classList.remove('open'); googleContentEl.innerHTML = ''; } });
 
 (async function init(){
-  setStatus('読み込み中…');
-  // 先にGASから全データを1回だけ取得してキャッシュしておく（通信を1回に集約）
+  // 先にプロフィールを読む（権限つきでデータを取得するため。ここでは通信しない）
+  await loadProfile();
+  // GASから見られる範囲のデータを1回だけ取得してキャッシュしておく
   try{
     await gasGetAll();
   }catch(e){
-    setStatus('⚠️ データの読み込みに失敗しました。通信環境を確認して、ページを再読み込みしてください。');
+    document.getElementById('boot-text').textContent = '⚠️ 読み込みに失敗しました。通信環境を確認して、ページを再読み込みしてください。';
+    setStatus('⚠️ データの読み込みに失敗しました。通信環境を確認して、ページを再読み込みしてください。', 'error');
   }
   // プロフィールは端末ローカル、その他はキャッシュから読む（ここでは通信は発生しない）
-  await Promise.all([loadProfile(), loadRequests(), loadOpenSlots(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
+  await Promise.all([loadRequests(), loadOpenSlots(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
   setStatus('');
   setupTokenClient();
   if(studentProfile){ showMain(); renderAll(); } else { showGate(); }
+  // 描画が終わってからローディング画面を消す
+  const boot = document.getElementById('boot-loading');
+  boot.classList.add('hide');
+  setTimeout(() => boot.remove(), 400);
 })();
 </script>
 </body>
