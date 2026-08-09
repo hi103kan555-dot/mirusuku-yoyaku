@@ -40,7 +40,6 @@
     cursor:pointer; flex-shrink:0; box-shadow:0 3px 0 rgba(107,66,38,0.15); white-space:nowrap;
   }
   .icon-round-btn .ico{ font-size:16px; line-height:1; }
-  .icon-round-btn:hover{ background:#fff; }
   .hero-actions{ display:flex; gap:8px; }
 
   .card{ background:var(--cream); border-radius:22px; padding:18px; box-shadow:0 6px 0 rgba(107,66,38,0.12); margin-bottom:16px; }
@@ -69,7 +68,6 @@
     font-family:inherit; font-size:13px; font-weight:700; background:var(--cream-2); border:none;
     color:var(--brown); padding:8px 14px; border-radius:999px; cursor:pointer;
   }
-  .week-nav button:hover{ background:#FFE9B8; }
   .week-label{ font-size:14px; font-weight:700; color:var(--brown); }
   .link-btn{ font-family:inherit; font-size:12.5px; font-weight:700; background:none; border:none; color:#FF9F1C; cursor:pointer; text-decoration:underline; }
 
@@ -86,7 +84,6 @@
     background:#fffef9; transition:background 0.12s ease;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.2;
   }
-  .cell:hover{ background:var(--cream-2); }
   .cell.pending{ border:none; background:var(--pending); color:var(--pending-text); }
   .cell.confirmed{ border:none; background:var(--confirmed); color:var(--confirmed-text); }
   .cell.off{ border:none; background:var(--off-bg); color:#C9BBA3; cursor:default; }
@@ -181,13 +178,9 @@
   .modal-actions{ display:flex; gap:8px; margin-top:16px; flex-wrap:wrap; }
   .btn{ font-family:inherit; font-size:13.5px; font-weight:700; padding:10px 16px; border-radius:999px; border:none; cursor:pointer; flex:1; }
   .btn-primary{ background:#FF9F1C; color:#fff; }
-  .btn-primary:hover{ background:#F08F00; }
   .btn-confirm{ background:var(--confirmed); color:var(--confirmed-text); }
-  .btn-confirm:hover{ background:#7BC48D; }
   .btn-danger{ background:#FFE3DC; color:#B24C33; }
-  .btn-danger:hover{ background:#FFD1C4; }
   .btn-ghost{ background:var(--cream-2); color:var(--brown); }
-  .btn-ghost:hover{ background:#FFE9B8; }
 
   .candidate-option{ display:flex; align-items:center; gap:8px; background:#fff; border:2px solid var(--line); border-radius:12px; padding:10px 12px; margin-bottom:8px; font-size:13.5px; }
   .candidate-option input{ width:auto; margin:0; }
@@ -224,17 +217,37 @@
   .logo-badge .dot1{ animation:pop-pulse 1.8s ease-in-out infinite; }
   @keyframes pop-pulse{ 0%,100%{ transform:scale(1); } 50%{ transform:scale(1.25); } }
 
-  .btn, .tab-btn, .mini-btn, .icon-round-btn, .cell, .month-event{
+  .btn, .tab-btn, .mini-btn, .icon-round-btn, .month-event{
     transition:transform 0.12s ease, box-shadow 0.12s ease;
   }
-  .btn:hover, .mini-btn:hover, .icon-round-btn:hover{ transform:translateY(-2px) scale(1.03); }
   .btn:active, .mini-btn:active, .icon-round-btn:active{ transform:translateY(0) scale(0.96); }
-  .tab-btn:hover{ transform:scale(1.04); }
   .tab-btn:active{ transform:scale(0.96); }
-  .cell:hover{ transform:scale(1.05); }
+
+  /* タップ端末では :hover が「タップしたあと押しっぱなし」の状態として残り、
+     押した要素の色や大きさが元に戻らなくなる。
+     そのため、マウスを使う環境(hover:hover)でだけ効くようにまとめておく。 */
+  @media (hover: hover) and (pointer: fine){
+    .icon-round-btn:hover{ background:#fff; }
+    .week-nav button:hover{ background:#FFE9B8; }
+    .cell:hover{ background:var(--cream-2); }
+    .btn-confirm:hover{ background:#7BC48D; }
+    .btn-danger:hover{ background:#FFD1C4; }
+    .btn-ghost:hover{ background:#FFE9B8; }
+    .btn-primary:hover{ background:linear-gradient(135deg,#FFA82E,#FF7CA6); }
+    .btn:hover, .mini-btn:hover, .icon-round-btn:hover{ transform:translateY(-2px) scale(1.03); }
+    .tab-btn:hover{ transform:scale(1.04); }
+  }
+
+  /* タップ時の灰色い点滅を消し、素早い連続タップで拡大鏡が出ないようにする */
+  .btn, .tab-btn, .mini-btn, .icon-round-btn, .cell, .link-btn, .week-nav button,
+  .col-toggle, .row-toggle, .month-event, input, select, textarea{
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  /* 指で押したときの手応えは、色の変化で伝える */
+  .cell:active{ filter:brightness(0.94); }
 
   .btn-primary{ background:linear-gradient(135deg,#FFB347,#FF8FB1); }
-  .btn-primary:hover{ background:linear-gradient(135deg,#FFA82E,#FF7CA6); }
   .btn-confirm{ background:linear-gradient(135deg,#8FD19E,#7FE8C4); }
   .mini-btn.confirm{ background:linear-gradient(135deg,#8FD19E,#7FE8C4); }
 
@@ -1945,7 +1958,7 @@ function openResourceAvailability(resourceId, displayName){
         // 失敗時はモーダルを閉じない(入力内容を失わせないため)
         saveBtn.disabled = false;
         saveBtn.textContent = '保存する';
-        alert('保存できませんでした。\n\nスプレッドシートへの書き込みが拒否されています。GAS側で openSlots というキーの保存が許可されているかご確認ください。\n\nこの画面はまだ閉じないでください(閉じると入力内容が消えます)。');
+        alert('保存できませんでした。\n\n運営パスコードが確認できていない可能性があります。一度ログアウトして、新しい運営パスコードでログインし直してから、もう一度お試しください。\n\nこの画面を閉じると入力内容が消えるため、閉じる前にどこかに控えておくと安心です。');
         return;
       }
       setStatus('対応可能枠を保存しました。');
@@ -2291,7 +2304,26 @@ googleOverlayEl.addEventListener('click', (e) => { if(e.target === googleOverlay
   await Promise.all([loadRequests(), loadOpenSlots(), loadNotifySettings(), loadGoogleSettings(), loadStudentRegistry()]);
   setStatus('');
   setupTokenClient();
+
+  // 運営としてログイン中なのに、GAS側で運営と認められていない場合。
+  // (パスコードが新しくなる前からログインしたままの端末で起きる)
+  // そのままだと画面は開けるのに保存だけ失敗するため、入り直してもらう。
+  let needsRelogin = false;
+  if(studentProfile && studentProfile.role === 'unei' && _gasCache && _gasCache.isOperator === false){
+    needsRelogin = true;
+    const keptName = studentProfile.name, keptEmail = studentProfile.email;
+    studentProfile = null;
+    operatorPass = '';
+    try{ localStorage.removeItem(PROFILE_KEY); }catch(e){}
+    document.getElementById('gate-name').value = keptName || '';
+    document.getElementById('gate-email').value = keptEmail || '';
+  }
+
   if(studentProfile){ showMain(); renderAll(); } else { showGate(); }
+  if(needsRelogin){
+    document.getElementById('role-unei').click();
+    setGateError('運営パスコードが新しくなりました。お手数ですが、新しいパスコードでログインし直してください。');
+  }
   // 描画が終わってからローディング画面を消す
   const boot = document.getElementById('boot-loading');
   boot.classList.add('hide');
