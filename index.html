@@ -148,6 +148,8 @@
   .mini-btn{ font-family:inherit; font-size:12px; font-weight:700; border:none; border-radius:999px; padding:6px 12px; cursor:pointer; }
   .mini-btn.confirm{ background:var(--confirmed); color:var(--confirmed-text); }
   .mini-btn.cancel{ background:#FFE3DC; color:#B24C33; }
+  .mini-btn.edit{ background:var(--cream-2); color:var(--brown); }
+  .list-main .staff-memo{ color:#8A6A4F; background:var(--cream-2); border-radius:8px; padding:3px 8px; display:inline-block; margin-top:4px; }
 
   .report-controls{ display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
   .stat-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:14px; }
@@ -670,6 +672,36 @@ function askPasscode({ title, message, placeholder = 'パスコード' }){
   });
 }
 
+/* 予約を1件だけ追加してもらう。
+   生徒の画面には氏名を伏せた予約リストが届くため、リスト全体を書き戻すと
+   他の人の氏名やコースを消してしまう。そのため1件分だけを送り、
+   リストへの追加はGAS側で行う。 */
+async function gasAddRequest(request){
+  const res = await fetch(GAS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action:'addRequest', token: SHARED_TOKEN, pass: operatorPass, request })
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'addRequest failed');
+  return data;
+}
+
+// 予約を1件だけ取り消してもらう（運営、または本人の予約のみ）
+async function gasCancelRequest(id){
+  const res = await fetch(GAS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      action:'cancelRequest', token: SHARED_TOKEN, pass: operatorPass, id,
+      viewer: (studentProfile && studentProfile.email) || ''
+    })
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'cancelRequest failed');
+  return data;
+}
+
 // GASにメール送信を依頼する。宛先はGAS側が通知設定を見て決めるため、ここでは渡さない。
 async function gasNotify(payload){
   const res = await fetch(GAS_URL, {
@@ -706,6 +738,12 @@ async function saveRequests(){
    applyFn は最新のリストを受け取り、書き戻すリストを返す。
    途中で「もう無理」と判断したら null を返すと保存を中止できる。 */
 async function commitRequests(applyFn){
+  // リスト全体の書き戻しは、氏名まで揃ったデータを持つ運営だけが行える。
+  // (生徒の画面には氏名が伏せられて届くため、書き戻すと他の人の情報が消える)
+  if(!operatorPass){
+    setStatus('この操作には運営としてのログインが必要です。', 'error');
+    return false;
+  }
   let next;
   try{
     const data = await gasGetAll(true);
@@ -1295,11 +1333,13 @@ function renderList(){
         <div class="list-main">
           <div><b>${ins ? escapeHtml(ins.name) : ''}</b>${r.assignedStaff ? ' ・ ' + escapeHtml(r.assignedStaff) : ''} ${escapeHtml(dateTimeLabel)} ・ ${escapeHtml(r.course || '未選択')}</div>
           ${(r.name || r.memo) ? `<div class="meta">${escapeHtml(r.name || '')}${r.memo ? (r.name ? ' ・ ' : '') + escapeHtml(r.memo) : ''}</div>` : ''}
+          ${(isUnei && r.staffMemo) ? `<div class="meta staff-memo">📝 ${escapeHtml(r.staffMemo)}</div>` : ''}
         </div>
         <span class="badge ${badgeClass}">${statusLabel}</span>
         <div class="list-actions">
           ${r.status === 'pending' && isUnei ? `<button class="mini-btn confirm" data-action="open-approve" data-id="${r.id}">候補を確認</button>` : ''}
           ${r.status === 'confirmed' && isUnei ? `<button class="mini-btn confirm" data-action="open-reschedule" data-id="${r.id}">日時変更</button>` : ''}
+          ${isUnei ? `<button class="mini-btn edit" data-action="open-edit" data-id="${r.id}">編集</button>` : ''}
           <button class="mini-btn cancel" data-action="list-cancel" data-id="${r.id}">取消</button>
         </div>
       </div>
@@ -1451,8 +1491,14 @@ function openCandidateApplyModal(){
         candidates: selectedCandidates.map(c => ({ date:c.date, hour:c.hour })),
         name, email, course, memo
       };
-      const ok = await commitRequests(latest => latest.concat([newReq]));
-      if(!ok) return;
+      try{
+        await gasAddRequest(newReq);
+      }catch(err){
+        console.error('予約の保存に失敗:', err);
+        setStatus('予約を保存できませんでした。通信環境を確認して、もう一度お試しください。', 'error');
+        return;
+      }
+      await reloadAllData();
       selectedCandidates = [];
       closeModal();
       renderAll();
@@ -1612,14 +1658,92 @@ function openCandidateApprovalModal(reqId){
     });
     if(!ok) return;
     await withBusy(ev.currentTarget, '取り消し中…', async () => {
-      const done = await commitRequests(latest => latest.filter(r => r.id !== req.id));
-      if(!done) return;
+      try{
+        await gasCancelRequest(req.id);
+      }catch(err){
+        console.error('取り消しに失敗:', err);
+        setStatus('取り消しできませんでした。もう一度お試しください。', 'error');
+        return;
+      }
+      await reloadAllData();
       closeModal();
       renderAll();
       setStatus('申請を取り消しました。');
     });
   });
   document.getElementById('c-close').addEventListener('click', closeModal);
+  overlayEl.classList.add('open');
+}
+
+/* 運営専用: 予約の中身を直す。
+   通信トラブルなどで氏名が欠けてしまったときの復旧や、
+   運営どうしの申し送りメモに使う。 */
+function openEditModal(reqId){
+  const req = requests.find(r => r.id === reqId);
+  if(!req) return;
+  const ins = instructorOf(req.instructorId);
+  const known = COURSES.includes(req.course);
+  const courseOptions = `<option value="" ${known ? '' : 'selected'}>未選択</option>` +
+    COURSES.map(c => `<option value="${escapeHtml(c)}" ${req.course === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('');
+  let whenLabel;
+  if(req.status === 'confirmed'){
+    const d = new Date(req.date + 'T00:00:00');
+    whenLabel = `${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)}) ${formatHour(req.hour)}〜${formatHour(req.hour+1)}`;
+  }else{
+    whenLabel = (req.candidates || []).map((c,i) => {
+      const d = new Date(c.date + 'T00:00:00');
+      return `${CANDIDATE_LABEL[i]} ${d.getMonth()+1}/${d.getDate()}(${weekdayJp(d)})${formatHour(c.hour)}`;
+    }).join(' / ');
+  }
+
+  modalEl.innerHTML = `
+    <h2>予約の内容を編集(運営専用)</h2>
+    <p class="sub">${escapeHtml(ins ? ins.name : '')}${req.assignedStaff ? ' ・ ' + escapeHtml(req.assignedStaff) : ''} ・ ${escapeHtml(whenLabel)}</p>
+    <label>生徒名</label>
+    <input type="text" id="e-name" value="${escapeHtml(req.name || '')}" placeholder="例: 山田春佳">
+    <label>メールアドレス</label>
+    <input type="email" id="e-email" value="${escapeHtml(req.email || '')}" placeholder="通知メールの宛先になります">
+    <label>コース</label>
+    <select id="e-course">${courseOptions}</select>
+    <label>生徒からのメモ</label>
+    <textarea id="e-memo" rows="2">${escapeHtml(req.memo || '')}</textarea>
+    <label>運営メモ(生徒には表示されません)</label>
+    <textarea id="e-staff-memo" rows="2" placeholder="申し送りや補足があれば">${escapeHtml(req.staffMemo || '')}</textarea>
+    <p class="help">日時の変更は「日時変更」から行ってください。ここを保存しても通知メールは送信されません。</p>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="e-save">保存する</button>
+      <button class="btn btn-ghost" id="e-close">閉じる</button>
+    </div>
+  `;
+
+  document.getElementById('e-save').addEventListener('click', async (ev) => {
+    await withBusy(ev.currentTarget, '保存中…', async () => {
+      const name = document.getElementById('e-name').value.trim();
+      const email = document.getElementById('e-email').value.trim();
+      const course = document.getElementById('e-course').value;
+      const memo = document.getElementById('e-memo').value.trim();
+      const staffMemo = document.getElementById('e-staff-memo').value.trim();
+
+      const done = await commitRequests(latest => {
+        const target = latest.find(r => r.id === req.id);
+        if(!target){
+          setStatus('この予約は、ほかの画面ですでに取り消されています。', 'error');
+          return null;
+        }
+        target.name = name;
+        target.email = email;
+        target.course = course;
+        target.memo = memo;
+        target.staffMemo = staffMemo;
+        return latest;
+      });
+      if(!done) return;
+      closeModal();
+      renderAll();
+      setStatus('予約の内容を更新しました。');
+    });
+  });
+  document.getElementById('e-close').addEventListener('click', closeModal);
   overlayEl.classList.add('open');
 }
 
@@ -2260,6 +2384,9 @@ listEl.addEventListener('click', async (e) => {
   if(btn.dataset.action === 'open-reschedule'){
     openRescheduleModal(id);
   }
+  if(btn.dataset.action === 'open-edit'){
+    openEditModal(id);
+  }
   if(btn.dataset.action === 'list-cancel'){
     const ok = await askConfirm({
       title: 'この予約を取り消しますか？',
@@ -2269,8 +2396,14 @@ listEl.addEventListener('click', async (e) => {
     });
     if(!ok) return;
     await withBusy(btn, '取り消し中…', async () => {
-      const done = await commitRequests(latest => latest.filter(r => r.id !== id));
-      if(!done) return;
+      try{
+        await gasCancelRequest(id);
+      }catch(err){
+        console.error('取り消しに失敗:', err);
+        setStatus('取り消しできませんでした。もう一度お試しください。', 'error');
+        return;
+      }
+      await reloadAllData();
       renderAll();
       setStatus('予約を取り消しました。');
     });
